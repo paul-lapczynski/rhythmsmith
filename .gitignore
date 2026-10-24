@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+venv/
+*.egg-info/
+
+# Songs, audio and song data (copyrighted, large): never committed
+*.mp3
+*.ogg
+*.wav
+*.flac
+*.opus
+*.mogg
+*.wma
+*.m4a
+songs/
+song-data/
+generated/
+examples/
+calibration/
+
+# Charts (generated, or commercial ones used for reference)
+notes.mid
+notes.chart
+*.sm
+*.ssc
+*.dwi
+
+# Training data, checkpoints
+training-data/
+*.pt
+
+# Build output and bundled binaries
+build/
+dist/
+**/packaging/build/
+**/packaging/dist/
+**/packaging/ffmpeg/
+**/packaging/files.wxs
+**/packaging/version.txt
+*.zip
+*.msi
+*.exe
+
+# Logs and editor/OS clutter
+*.log
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Local Claude Code settings
+.claude/
