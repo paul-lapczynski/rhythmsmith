@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rhythmsmith-core"
+version = "0.0.1"
+description = "Shared audio, add-on and artwork code for the RhythmSmith rhythm-game chart tools"
+readme = { text = "Shared code for BandSmith and BeatSmith; see the repository README.", content-type = "text/plain" }
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["numpy", "mutagen>=1.47"]
+
+[project.optional-dependencies]
+# heavy and opt-in: the apps download these as add-ons instead (addons.py)
+stems = ["demucs", "soundfile"]
+lyrics = ["faster-whisper", "soundfile"]
+
+[tool.setuptools]
+packages = ["rhythmsmith_core"]

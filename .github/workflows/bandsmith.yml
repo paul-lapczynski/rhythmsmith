@@ -1,0 +1,137 @@
+# Builds BandSmith: the Windows installers (bandsmith/packaging/build.bat) and
+# the macOS disk image (bandsmith/packaging/build-mac.sh), after the smoke
+# tests. Pull requests and merges to main that touch bandsmith/ or core/ make
+# test builds, kept as workflow artifacts, as does "Run workflow" on the
+# Actions tab. Push a tag like bandsmith-v0.0.2 to publish a GitHub release with
+# all of them attached. Changes to docs and pictures alone don't build.
+name: BandSmith
+
+on:
+  push:
+    branches: [main]
+    tags: ["bandsmith-v*"]        # tags always build; the paths below don't apply to them
+    paths:
+      # BandSmith and the shared core, except docs and pictures; later lines
+      # win, so packaging and this workflow always count
+      - "bandsmith/**"
+      - "core/**"
+      - "!**/*.md"
+      - "!**/*.png"
+      - "bandsmith/packaging/**"
+      - ".github/workflows/bandsmith.yml"
+  pull_request:
+    paths:                        # the same list as above
+      - "bandsmith/**"
+      - "core/**"
+      - "!**/*.md"
+      - "!**/*.png"
+      - "bandsmith/packaging/**"
+      - ".github/workflows/bandsmith.yml"
+  workflow_dispatch:
+
+concurrency:
+  # a newer push to the same PR replaces a build still running; every merge to
+  # main and every tag builds in full
+  group: bandsmith-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+
+env:
+  # a tag sets the version (bandsmith-v0.0.2 -> 0.0.2); test builds use 0.0.1
+  BANDSMITH_VERSION: ${{ startsWith(github.ref, 'refs/tags/bandsmith-v') && github.ref_name || '0.0.1' }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            bandsmith/requirements.txt
+            core/pyproject.toml
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Pick the version
+        shell: bash
+        run: echo "BANDSMITH_VERSION=${BANDSMITH_VERSION#bandsmith-v}" >> "$GITHUB_ENV"
+
+      - name: Smoke tests
+        shell: bash
+        run: |
+          python -m pip install -r bandsmith/requirements.txt ./core pytest
+          python -m pytest bandsmith/tests -q
+
+      - name: Build
+        shell: cmd
+        env:
+          # build.bat makes its venv with "py -3", which would pick the runner's newest Python
+          PY_PYTHON3: "3.12"
+          # the Inno Setup .exe installer only goes into releases
+          BANDSMITH_SKIP_EXE: ${{ startsWith(github.ref, 'refs/tags/bandsmith-v') && '0' || '1' }}
+        run: bandsmith\packaging\build.bat
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandsmith-windows-${{ env.BANDSMITH_VERSION }}
+          path: |
+            bandsmith/packaging/dist/*.msi
+            bandsmith/packaging/dist/*.exe
+
+  mac:
+    runs-on: macos-latest       # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            bandsmith/requirements.txt
+            core/pyproject.toml
+
+      - name: Pick the version
+        run: echo "BANDSMITH_VERSION=${BANDSMITH_VERSION#bandsmith-v}" >> "$GITHUB_ENV"
+
+      - name: Smoke tests
+        run: |
+          python -m pip install -r bandsmith/requirements.txt ./core pytest
+          python -m pytest bandsmith/tests -q
+
+      - name: Build
+        env:
+          PYTHON: python
+        run: sh bandsmith/packaging/build-mac.sh
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandsmith-mac-${{ env.BANDSMITH_VERSION }}
+          path: bandsmith/packaging/dist/*.dmg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/bandsmith-v')
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" \
+            --title "BandSmith ${GITHUB_REF_NAME#bandsmith-v}" --generate-notes

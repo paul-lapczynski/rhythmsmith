@@ -1,0 +1,37 @@
+<!-- WiX v5 source for the BandSmith MSI. Built by build.bat; see BUILD.md. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="BandSmith" Manufacturer="BandSmith" Version="$(Version)"
+           UpgradeCode="E7D88F5F-6B90-49D6-A68F-31C34099B2B3" Scope="perMachine">
+    <SummaryInformation Description="BandSmith: Clone Hero / Rock Band chart generator" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of BandSmith is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="bandsmith.ico" SourceFile="bandsmith.ico" />
+    <Property Id="ARPPRODUCTICON" Value="bandsmith.ico" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <!-- filled by files.wxs (harvest.py): the whole PyInstaller build -->
+      <Directory Id="INSTALLFOLDER" Name="BandSmith" />
+    </StandardDirectory>
+
+    <ComponentGroupRef Id="AppFiles" />
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="StartMenuApp" Name="BandSmith" Description="Make Clone Hero / Rock Band charts from songs"
+                  Target="[INSTALLFOLDER]bandsmith.exe" WorkingDirectory="INSTALLFOLDER" Icon="bandsmith.ico" />
+        <RegistryValue Root="HKLM" Key="Software\BandSmith" Name="startmenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut">
+        <Shortcut Id="DesktopApp" Name="BandSmith" Target="[INSTALLFOLDER]bandsmith.exe"
+                  WorkingDirectory="INSTALLFOLDER" Icon="bandsmith.ico" />
+        <RegistryValue Root="HKLM" Key="Software\BandSmith" Name="desktop" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>
