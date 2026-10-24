@@ -7,6 +7,8 @@ installer:
   gpu      NVIDIA GPU support for both (PyTorch's CUDA build, about 3 GB).
            Only offered when an NVIDIA card is found. A Mac needs no
            download: the regular PyTorch already uses Apple Silicon.
+  beats    AI beat tracking with Beat This! (needs stems' PyTorch; about 100 MB)
+  notes    AI note detection with basic-pitch, on ONNX Runtime (about 150 MB)
 
 They share one private Python in the user's app-data folder, so the
 installed app stays small and nothing touches a Python you may have. Every
@@ -16,8 +18,8 @@ downloaded and printed again as it happens.
 The htdemucs_6s model (guitar and piano stems as well, for band charts) is
 fetched on first use, or ahead of time with install_model(MODEL_6S).
 
-    python -m rhythmsmith_core.addons install [stems|lyrics|gpu]   # what the app's download buttons run
-    python -m rhythmsmith_core.addons sources [stems|lyrics|gpu]
+    python -m rhythmsmith_core.addons install [stems|lyrics|gpu|beats|notes]   # the app's download buttons
+    python -m rhythmsmith_core.addons sources [stems|lyrics|gpu|beats|notes]
     python -m rhythmsmith_core.addons status
 """
 from __future__ import annotations
@@ -33,7 +35,16 @@ PY_VERSION = "3.12.7"
 PY_EMBED = f"https://www.python.org/ftp/python/{PY_VERSION}/python-{PY_VERSION}-embed-amd64.zip"
 GET_PIP = "https://bootstrap.pypa.io/get-pip.py"
 PYPI = "https://pypi.org (package files from files.pythonhosted.org)"
-PACKAGES = {"stems": ["demucs", "soundfile", "numpy"], "lyrics": ["faster-whisper"]}
+PACKAGES = {"stems": ["demucs", "soundfile", "numpy"], "lyrics": ["faster-whisper"],
+            "beats": ["beat-this", "soxr", "einops", "rotary-embedding-torch"],
+            # basic-pitch without its TensorFlow dependency: it runs its bundled
+            # ONNX model with ONNX Runtime instead (--no-deps, then what it needs)
+            "notes": ["onnxruntime", "librosa", "mir-eval", "pretty-midi", "resampy<0.4.3",
+                      "scikit-learn", "scipy"]}
+NO_DEPS = {"notes": ["basic-pitch"]}
+BEAT_THIS_URL = "https://github.com/CPJKU/beat_this"
+BEAT_THIS_CHECKPOINT = "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt"
+BASIC_PITCH_URL = "https://github.com/spotify/basic-pitch"
 DEMUCS_MODEL = "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th"
 MODEL = "htdemucs"
 MODEL_6S = "htdemucs_6s"         # adds guitar and piano stems
@@ -45,8 +56,11 @@ WHISPER_URL = f"https://huggingface.co/{WHISPER_REPO}"
 # faster-whisper (CTranslate2) uses the cuBLAS/cuDNN 12 libraries it ships
 TORCH_CUDA = "https://download.pytorch.org/whl"
 TORCH_CUDA_BUILDS = ("cu128", "cu126", "cu130")
-NAMES = {"stems": "Vocal separation", "lyrics": "AI verse detection", "gpu": "NVIDIA GPU support"}
-SIZES = {"stems": "about 1 GB", "lyrics": "about 650 MB", "gpu": "about 3 GB"}
+NAMES = {"stems": "Vocal separation", "lyrics": "AI verse detection", "gpu": "NVIDIA GPU support",
+         "beats": "AI beat tracking (Beat This!)", "notes": "AI note detection (basic-pitch)"}
+SIZES = {"stems": "about 1 GB", "lyrics": "about 650 MB", "gpu": "about 3 GB",
+         "beats": "about 100 MB", "notes": "about 150 MB"}
+NEEDS_STEMS = {"gpu", "beats"}          # these build on the stems add-on's PyTorch
 
 
 def sources(kind: str) -> list[tuple[str, str]]:
@@ -59,6 +73,16 @@ def sources(kind: str) -> list[tuple[str, str]]:
         out += [("Demucs, SoundFile, NumPy and PyTorch (Demucs needs it), from the Python "
                  "Package Index", PYPI),
                 ("The htdemucs separation model (Meta)", DEMUCS_MODEL)]
+    elif kind == "beats":
+        out += [("Beat This! (CPJKU, MIT licence) and what it needs (einops, "
+                 "rotary-embedding-torch, soxr), from the Python Package Index", PYPI),
+                ("Beat This!'s source", BEAT_THIS_URL),
+                ("The Beat This! 'final0' model, from its authors' server", BEAT_THIS_CHECKPOINT)]
+    elif kind == "notes":
+        out += [("basic-pitch (Spotify, Apache 2.0) with its bundled ONNX model, ONNX Runtime, "
+                 "librosa, mir_eval, pretty_midi, resampy, scikit-learn and SciPy, from the "
+                 "Python Package Index", PYPI),
+                ("basic-pitch's source", BASIC_PITCH_URL)]
     elif kind == "gpu":
         out += [("PyTorch and torchaudio built for NVIDIA CUDA, with the CUDA libraries they "
                  "need, replacing the CPU-only PyTorch (PyTorch's own package server; the first "
@@ -141,9 +165,24 @@ def gpu_python() -> str | None:
         return None
 
 
+def extra_python(kind: str) -> str | None:
+    """A Python with the "beats" or "notes" add-on, or None if it isn't installed."""
+    mod = {"beats": "beat_this", "notes": "basic_pitch"}[kind]
+    if not getattr(sys, "frozen", False):
+        try:
+            __import__(mod)
+            return sys.executable
+        except Exception:
+            pass
+    p = _addon_python()
+    return str(p) if p.is_file() and (addon_dir() / f"{kind}.ok").is_file() else None
+
+
 def installed(kind: str = "stems") -> bool:
     if kind == "gpu":
         return gpu_python() is not None
+    if kind in ("beats", "notes"):
+        return extra_python(kind) is not None
     return (stems_python() if kind == "stems" else lyrics_python()) is not None
 
 
@@ -194,6 +233,12 @@ def install(log=print, kind: str = "stems") -> None:
     if kind == "gpu":
         _install_cuda_torch(py, log)
         return
+    if kind in NEEDS_STEMS and stems_python() is None:
+        raise RuntimeError(f"download vocal separation first: {NAMES[kind]} uses its PyTorch")
+    for pkg in NO_DEPS.get(kind, []):
+        log(f"installing {pkg} from {PYPI}")
+        subprocess.run([str(py), "-m", "pip", "install", "--no-warn-script-location", "--no-deps", pkg],
+                       check=True, **_no_window())
     log(f"installing {', '.join(PACKAGES[kind])} from {PYPI} (this takes a while)")
     subprocess.run([str(py), "-m", "pip", "install", "--no-warn-script-location", *PACKAGES[kind]],
                    check=True, **_no_window())
@@ -201,6 +246,13 @@ def install(log=print, kind: str = "stems") -> None:
         log(f"fetching the separation model from {DEMUCS_MODEL}")
         install_model(MODEL, log)
         log("vocal separation is ready")
+    elif kind in ("beats", "notes"):
+        if kind == "beats":
+            log(f"fetching the Beat This! model from {BEAT_THIS_CHECKPOINT}")
+            subprocess.run([str(py), "-c", "from beat_this.inference import load_checkpoint; "
+                            "load_checkpoint('final0')"], check=True, **_no_window())
+        (addon_dir() / f"{kind}.ok").write_text("ok")
+        log(f"{NAMES[kind]} is ready")
     else:
         log(f"fetching the Whisper model from {WHISPER_URL}")
         subprocess.run([str(py), str(_here() / "lyrics.py"), "fetch", str(whisper_dir())],
@@ -262,6 +314,21 @@ def separate(song: Path, out_dir: Path, log=print, model: str = MODEL) -> bool:
     if r.returncode != 0:
         lines = (r.stderr or r.stdout or "").strip().splitlines()
         log("stem separation failed: " + (lines[-1] if lines else "no output"))
+        return False
+    return True
+
+
+def run_script(kind: str, script: str, args: list, log=print) -> bool:
+    """Run one of this package's scripts with the Python that has add-on `kind`.
+    False if the add-on isn't there or the script failed."""
+    py = extra_python(kind)
+    if py is None:
+        return False
+    r = subprocess.run([py, str(_here() / script), *map(str, args)], capture_output=True, text=True,
+                       **_no_window())
+    if r.returncode != 0:
+        lines = (r.stderr or r.stdout or "").strip().splitlines()
+        log(f"{NAMES[kind]} failed: " + (lines[-1] if lines else "no output"))
         return False
     return True
 

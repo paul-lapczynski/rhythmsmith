@@ -64,9 +64,19 @@ jobs:
         shell: bash
         run: echo "BANDSMITH_VERSION=${BANDSMITH_VERSION#bandsmith-v}" >> "$GITHUB_ENV"
 
-      - name: Smoke tests
+      # scan-chart (Node) checks the charts the tests write; test-only, never bundled
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bandsmith/tools/scan-chart/package-lock.json
+
+      - name: Tests
+        env:
+          BANDSMITH_REQUIRE_SCAN_CHART: "1"
         shell: bash
         run: |
+          npm ci --prefix bandsmith/tools/scan-chart
           python -m pip install -r bandsmith/requirements.txt ./core pytest
           python -m pytest bandsmith/tests -q
 
@@ -103,8 +113,18 @@ jobs:
       - name: Pick the version
         run: echo "BANDSMITH_VERSION=${BANDSMITH_VERSION#bandsmith-v}" >> "$GITHUB_ENV"
 
-      - name: Smoke tests
+      # scan-chart (Node) checks the charts the tests write; test-only, never bundled
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bandsmith/tools/scan-chart/package-lock.json
+
+      - name: Tests
+        env:
+          BANDSMITH_REQUIRE_SCAN_CHART: "1"
         run: |
+          npm ci --prefix bandsmith/tools/scan-chart
           python -m pip install -r bandsmith/requirements.txt ./core pytest
           python -m pytest bandsmith/tests -q
 
