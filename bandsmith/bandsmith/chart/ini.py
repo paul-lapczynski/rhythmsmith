@@ -15,12 +15,13 @@ def ini_text(song: Song, song_length_ms: int, difficulties: dict[str, int] | Non
     d = difficulties or {}
     has = {name: bool(p.notes.get("expert")) for name, p in song.parts.items()}
     has["vocals"] = bool(song.vocals and song.vocals.notes)
+    # Clone Hero lists songs by these, and checkers flag empty ones
     lines = ["[song]",
-             f"name = {song.name}",
-             f"artist = {song.artist}",
-             f"album = {song.album}",
-             f"genre = {song.genre}",
-             f"year = {song.year}",
+             f"name = {song.name or 'Untitled'}",
+             f"artist = {song.artist or 'Unknown Artist'}",
+             f"album = {song.album or 'Unknown Album'}",
+             f"genre = {song.genre or 'Unknown Genre'}",
+             f"year = {song.year or 'Unknown Year'}",
              f"charter = {song.charter}",
              f"song_length = {int(song_length_ms)}",
              f"preview_start_time = {int(preview_ms if preview_ms is not None else song_length_ms * 0.35)}",

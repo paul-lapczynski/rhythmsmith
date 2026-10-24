@@ -15,10 +15,12 @@ datas = [(SPECPATH + "/version.txt", "."), (SPECPATH + "/bandsmith.png", "."),
          (core_dir + "/rhythmsmith_core/stems.py", "rhythmsmith_core"),
          (core_dir + "/rhythmsmith_core/lyrics.py", "rhythmsmith_core"),
          (core_dir + "/rhythmsmith_core/accel.py", "rhythmsmith_core"),
-         (core_dir + "/rhythmsmith_core/beats.py", "rhythmsmith_core")]
+         (core_dir + "/rhythmsmith_core/beats.py", "rhythmsmith_core"),
+         (core_dir + "/rhythmsmith_core/notes.py", "rhythmsmith_core")]
 hidden = ["rhythmsmith_core", "rhythmsmith_core.accel", "rhythmsmith_core.addons",
           "rhythmsmith_core.artwork", "rhythmsmith_core.lyrics", "rhythmsmith_core.stems",
-          "rhythmsmith_core.beats", "mutagen", "mido", "mido.backends"]
+          "rhythmsmith_core.beats", "rhythmsmith_core.notes", "mutagen", "mido", "mido.backends",
+          "bandsmith.cli", "bandsmith.analyze.make"]
 binaries = []
 from PyInstaller.utils.hooks import collect_all
 for pkg in ("librosa", "soundfile", "lazy_loader", "audioread", "soxr", "mido"):
