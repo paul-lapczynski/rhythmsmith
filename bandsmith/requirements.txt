@@ -1,0 +1,4 @@
+# BandSmith's own; the shared core is installed from ../core (pip install -e ../core)
+PySide6>=6.6
+numpy
+mutagen>=1.47
