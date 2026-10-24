@@ -18,12 +18,14 @@ core/                     rhythmsmith_core: shared by the apps
     lyrics.py             Whisper: the words off a vocals stem
     artwork.py            a song's cover art (beside it, in its tags, or online when asked)
     beats.py              Beat This! beat tracking (an opt-in add-on)
+    notes.py              basic-pitch note detection (an opt-in add-on)
   pyproject.toml
 bandsmith/
   bandsmith/              the app (PySide6)
     chart/                the song model; notes.mid (read and write), song.ini, tempo map from beats
+    analyze/              stems, beats, drum/guitar/bass/vocal transcription, the Expert charting rules
   tests/                  tests (no song files needed: they make their own)
-  tools/                  demo_song.py (a synth song with an exact chart, for tests),
+  tools/                  demo_song.py (a synth song with an exact chart, for tests), eval_vs_reference.py,
                           scan-chart/ (test-only chart checker, Node), inventory.py
   packaging/              PyInstaller spec, Windows MSI/.exe and macOS .dmg builds (BUILD.md)
   requirements.txt
@@ -41,6 +43,7 @@ python -m venv .venv
 pip install -r bandsmith/requirements.txt -e core pytest
 cd bandsmith
 python -m bandsmith           # opens the BandSmith window
+python -m bandsmith make "Some Song.mp3" -o "out/Some Song"   # an Expert Clone Hero song folder
 python -m pytest tests        # tests; the scan-chart ones need Node:
 npm ci --prefix tools/scan-chart
 ```

@@ -39,7 +39,7 @@ PACKAGES = {"stems": ["demucs", "soundfile", "numpy"], "lyrics": ["faster-whispe
             "beats": ["beat-this", "soxr", "einops", "rotary-embedding-torch"],
             # basic-pitch without its TensorFlow dependency: it runs its bundled
             # ONNX model with ONNX Runtime instead (--no-deps, then what it needs)
-            "notes": ["onnxruntime", "librosa", "mir-eval", "pretty-midi", "resampy<0.4.3",
+            "notes": ["onnxruntime", "librosa", "mir-eval", "pretty-midi", "resampy<0.4.3", "setuptools<81",
                       "scikit-learn", "scipy"]}
 NO_DEPS = {"notes": ["basic-pitch"]}
 BEAT_THIS_URL = "https://github.com/CPJKU/beat_this"
