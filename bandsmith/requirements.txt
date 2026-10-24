@@ -1,4 +1,8 @@
 # BandSmith's own; the shared core is installed from ../core (pip install -e ../core)
 PySide6>=6.6
 numpy
+scipy
 mutagen>=1.47
+mido>=1.3
+librosa>=0.10
+soundfile>=0.12

@@ -17,10 +17,14 @@ core/                     rhythmsmith_core: shared by the apps
     addons.py             opt-in downloads, each showing its source URL first
     lyrics.py             Whisper: the words off a vocals stem
     artwork.py            a song's cover art (beside it, in its tags, or online when asked)
+    beats.py              Beat This! beat tracking (an opt-in add-on)
   pyproject.toml
 bandsmith/
   bandsmith/              the app (PySide6)
-  tests/                  smoke tests (no audio needed)
+    chart/                the song model; notes.mid (read and write), song.ini, tempo map from beats
+  tests/                  tests (no song files needed: they make their own)
+  tools/                  demo_song.py (a synth song with an exact chart, for tests),
+                          scan-chart/ (test-only chart checker, Node), inventory.py
   packaging/              PyInstaller spec, Windows MSI/.exe and macOS .dmg builds (BUILD.md)
   requirements.txt
 docs/                     the future GitHub Pages site
@@ -37,7 +41,8 @@ python -m venv .venv
 pip install -r bandsmith/requirements.txt -e core pytest
 cd bandsmith
 python -m bandsmith           # opens the BandSmith window
-python -m pytest tests        # smoke tests
+python -m pytest tests        # tests; the scan-chart ones need Node:
+npm ci --prefix tools/scan-chart
 ```
 
 To build the installers, see [bandsmith/packaging/BUILD.md](bandsmith/packaging/BUILD.md).

@@ -1,0 +1,9 @@
+{
+  "name": "bandsmith-scan-chart",
+  "private": true,
+  "description": "Test-only: checks generated charts with scan-chart. Not bundled with BandSmith.",
+  "type": "module",
+  "dependencies": {
+    "scan-chart": "8.0.1"
+  }
+}
