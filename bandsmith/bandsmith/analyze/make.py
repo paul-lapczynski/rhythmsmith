@@ -280,7 +280,9 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         if c is not None:
             log(f"progress: {name} slides and bends")
             ps, g = music.gestures(ps, c)
-            ps = music.extend_sustains(ps, c)
+            quick = music.legato_notes(ps, c)                  # quick notes in fast passages
+            ps = music.extend_sustains(sorted(ps + quick, key=lambda x: x.start), c)
+            g.update(music.slides(ps, c), quick_notes=len(quick))
             gestures[name] = g
         ns, info = music.chart(ps, tm, bass=name == "bass", solos=spans)
         chords[name] = {k: v for k, v in info.items() if k not in ("gestures", "lead")}
