@@ -69,6 +69,7 @@ class Part:
     notes: dict[str, list[Note]] = field(default_factory=dict)      # difficulty -> notes
     star_power: list[Phrase] = field(default_factory=list)
     activations: list[Phrase] = field(default_factory=list)       # drums: fills that activate star power
+    solos: list[Phrase] = field(default_factory=list)             # solo sections
 
 
 @dataclass

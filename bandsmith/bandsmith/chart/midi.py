@@ -26,6 +26,7 @@ TRACK_NAMES = {"guitar": "PART GUITAR", "bass": "PART BASS", "drums": "PART DRUM
 BASE = {"expert": 96, "hard": 84, "medium": 72, "easy": 60}
 STAR_POWER, PHRASE, DOUBLE_KICK = 116, 105, 95
 ACTIVATION = range(120, 125)          # drum fills: all five, over the fill
+SOLO = 103                            # a solo section
 TOMS = {2: 110, 3: 111, 4: 112}
 # a .mid note this long or shorter is a plain note, not a sustain: Clone Hero's
 # default for .mid (a third of a beat and a tick; scan-chart does the same). Rock
@@ -96,6 +97,8 @@ def _part_events(name: str, part: Part) -> list:
                 _note(ev, n.tick, SHORT, base + (5 if n.forced == "hopo" else 6))
     for sp in part.star_power:
         _note(ev, sp.tick, sp.length, STAR_POWER)
+    for s in part.solos:
+        _note(ev, s.tick, s.length, SOLO)
     for a in part.activations:
         for p in ACTIVATION:
             _note(ev, a.tick, a.length, p)
@@ -242,6 +245,9 @@ def _read_part(name: str, track) -> Part:
     for s, ln, p in spans:
         if p == STAR_POWER:
             part.star_power.append(Phrase(s, ln))
+            continue
+        if p == SOLO:
+            part.solos.append(Phrase(s, ln))
             continue
         if name == DRUMS and p in ACTIVATION:
             if p == ACTIVATION[0]:

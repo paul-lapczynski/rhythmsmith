@@ -64,6 +64,7 @@ class Played:
     gesture: str = ""             # "slide", "legato" or "" (and "bend" on notes that absorbed one)
     held: bool | None = None      # the AI model's call on whether it's held (None: by its length)
     chord_ok: bool | None = None  # the AI model's call on whether a chord belongs here (None: no model)
+    amp: float = 1.0              # how loud the transcription heard it (0-1)
 
 
 # ------------------------------------------------------------------ the notes that were played
@@ -123,9 +124,11 @@ def from_onsets(times, strengths, events: list[Event], c: "Contour | None" = Non
         here = evs[i0:i1]
         if not here:
             here = [e for e in evs[max(0, i0 - 40):i0] if e.start < t < e.end - 0.03]
+        amp = 0.0
         if here:
             pitches = sorted({p for e in here for p in e.pitches})
             end = max(e.end for e in here)
+            amp = max(e.strength for e in here)
         elif c is not None:
             seg = c.span(t, min(nxt, t + 0.15))
             seg = seg[~np.isnan(seg)]
@@ -141,6 +144,7 @@ def from_onsets(times, strengths, events: list[Event], c: "Contour | None" = Non
         else:
             continue
         p = Played(float(t), float(max(t + 0.05, end)), pitches, float(s), float(s))
+        p.amp = float(amp)
         if held is not None:
             p.held = bool(held[order[k]] >= held_cut)
         if chordy is not None:
@@ -242,6 +246,84 @@ def gestures(ps: list[Played], c: Contour) -> tuple[list[Played], dict]:
     return out, counts
 
 
+# ------------------------------------------------------------------ lead and rhythm voices
+
+VOICES = ("left", "center", "right")
+SOLO_SHARE = float(__import__("os").environ.get("BANDSMITH_SOLO_SHARE", "0.6"))   # the lead voice's share of the loudness
+SOLO_MIN = int(__import__("os").environ.get("BANDSMITH_SOLO_MIN", "4"))            # windows (of two beats) in a solo
+SOLO_WINDOW = 2 * R          # solos are found two beats at a time
+VOICE_HOP = 512
+
+
+def stereo_voices(y2: np.ndarray, sr: int) -> dict[str, np.ndarray] | None:
+    """The guitar stem split by where each sound sits in the stereo field (left,
+    center, right), as mono signals; None for a mono stem. Two guitars panned
+    apart (a lead over a rhythm part, say) come out separately."""
+    import librosa
+    if y2.ndim != 2 or y2.shape[1] < 2:
+        return None
+    left, right = y2[:, 0], y2[:, 1]
+    if np.corrcoef(left[:: 50], right[:: 50])[0, 1] > 0.98:            # really mono
+        return None
+    sl = librosa.stft(left, n_fft=2048, hop_length=VOICE_HOP)
+    sr_ = librosa.stft(right, n_fft=2048, hop_length=VOICE_HOP)
+    a, b = np.abs(sl), np.abs(sr_)
+    pan = a / (a + b + 1e-9)                                           # 1: all left, 0: all right
+    mid = (sl + sr_) / 2
+    masks = {"left": np.clip((pan - 0.55) / 0.15, 0, 1), "right": np.clip((0.45 - pan) / 0.15, 0, 1)}
+    masks["center"] = 1 - masks["left"] - masks["right"]
+    return {k: librosa.istft(mid * m, hop_length=VOICE_HOP, length=len(left)).astype(np.float32)
+            for k, m in masks.items()}
+
+
+def loudness(y: np.ndarray) -> np.ndarray:
+    import librosa
+    return librosa.feature.rms(y=y, hop_length=VOICE_HOP)[0]
+
+
+def solo_spans(voice_events: dict[str, list[Event]], voice_rms: dict[str, np.ndarray], sr: int, tm,
+               offset: float, first: int, last: int) -> list[tuple[int, int, str]]:
+    """(start tick, end tick, lead voice) of each solo: two-beat windows where one
+    voice carries most of the guitar's loudness (SOLO_SHARE) and plays a single
+    line (one pitch at a time, at least three notes), joined into sections of a
+    bar or more. Speed or register alone don't make a solo."""
+    frames_per_s = sr / VOICE_HOP
+    wins = []
+    t = (first // SOLO_WINDOW) * SOLO_WINDOW
+    while t < last:
+        a, b = tm.seconds(t) - offset, tm.seconds(t + SOLO_WINDOW) - offset
+        fa, fb = int(a * frames_per_s), max(int(a * frames_per_s) + 1, int(b * frames_per_s))
+        energy = {v: float(np.mean(voice_rms[v][fa:fb] ** 2)) if fb <= len(voice_rms[v]) else 0.0 for v in voice_rms}
+        total = sum(energy.values()) or 1.0
+        lead, share = max(((v, e / total) for v, e in energy.items()), key=lambda x: x[1])
+        evs = [e for e in voice_events.get(lead, []) if a <= e.start - offset < b]
+        single = np.mean([len(without_overtones(e.pitches, True)) == 1 for e in evs]) if evs else 0.0
+        moving = len({max(e.pitches) for e in evs}) >= 3
+        wins.append((t, lead if (share >= SOLO_SHARE and len(evs) >= 4 and single >= 0.8 and moving) else None))
+        t += SOLO_WINDOW
+    spans: list[list] = []
+    for t, lead in wins:
+        if lead and spans and spans[-1][1] == t and spans[-1][2] == lead:
+            spans[-1][1] = t + SOLO_WINDOW
+        elif lead:
+            spans.append([t, t + SOLO_WINDOW, lead])
+    return [(a, b, v) for a, b, v in spans if b - a >= SOLO_MIN * SOLO_WINDOW]
+
+
+def solo_notes(events: list[Event], span: tuple[int, int], tm, offset_ok: float = 0.0,
+               min_amp: float = 0.3) -> list[Played]:
+    """The lead voice's own notes inside a solo (each with its transcribed pitch:
+    nothing without pitch evidence)."""
+    a, b = tm.seconds(span[0]), tm.seconds(span[1])
+    out = []
+    for e in events:
+        if a <= e.start < b and e.strength >= min_amp:
+            p = Played(e.start, e.end, [max(without_overtones(e.pitches, True))], e.strength, 1.0)
+            p.amp = e.strength
+            out.append(p)
+    return out
+
+
 # ------------------------------------------------------------------ harmony
 
 def chord_kind(pitches: list[int]) -> str:
@@ -323,6 +405,7 @@ def fret_map(roots: list[int], lo: float, hi: float) -> dict[int, int]:
 THIRTYSECOND = R // 8
 OVERTONES = (12, 19, 24, 28, 31)           # semitones above a note where its harmonics ring
 LEAD_MIN_NOTES = 6
+FAINT = 0.4                               # transcription loudness below which a chord is faint
 
 
 def without_overtones(pitches: list[int], lead: bool) -> list[int]:
@@ -390,10 +473,14 @@ def plan_frets(pitches: list[int], sizes: list[int], start: int, prefer: dict | 
     return out[::-1]
 
 
-def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple[list[Note], dict]:
+def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
+          strict: float | None = None, solos: list[tuple[int, int, str]] | None = None) -> tuple[list[Note], dict]:
     """Expert chart notes from the played notes, a phrase at a time with the
     whole song known; and what was done (counts). max_chord: the largest chord,
-    in frets (1-4)."""
+    in frets (1-4). strict: notes found with a lower bar (strength under
+    `strict`) are kept only in solos, where quick quiet notes matter. solos: the
+    solo sections (solo_spans), when the voices could be told apart; without
+    them a phrase is a solo by how it moves (is_lead)."""
     items: list[tuple[int, Played]] = []
     for p in sorted(ps, key=lambda p: p.start):
         tick = tm.tick(p.start)
@@ -418,18 +505,34 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
     voiced: list[list[int]] = [[] for _ in items]
     leads = [False] * len(items)
     for ph in phrases(ticks):
-        lead = not bass and is_lead([items[i][1] for i in ph], [ticks[i] for i in ph], hi_pitch)
+        if solos is not None:
+            lead = not bass and any(a <= ticks[i] < b for i in ph for a, b, _ in solos)
+        else:
+            lead = not bass and is_lead([items[i][1] for i in ph], [ticks[i] for i in ph], hi_pitch)
         for i in ph:
+            if solos is not None and lead:
+                leads[i] = any(a <= ticks[i] < b for a, b, _ in solos)
+                if not leads[i]:
+                    voiced[i] = without_overtones(items[i][1].pitches, False)
+                    continue
             p = items[i][1]
             v = without_overtones(p.pitches, lead)
             # in a solo, single notes, unless a power chord is clearly held
             if lead and len(v) > 1 and not (chord_kind(v) == "power" and p.end - p.start >= 0.4):
                 v = [max(v)]
-            # pitches heard together, but the AI model hears no chord here: bleed or let-ring
-            if len(v) > 1 and p.chord_ok is False:
+            # pitches heard together, but the AI model hears no chord here: in a solo, or
+            # when the chord is faint, it's likely bleed or let-ring; a clear rhythm chord stays
+            if len(v) > 1 and p.chord_ok is False and (lead or p.amp < FAINT):
                 v = [max(v)] if lead else [min(v)]
             voiced[i] = v
             leads[i] = lead
+    if strict is not None:
+        keep = [k for k in range(len(items)) if leads[k] or items[k][1].strength >= strict]
+        if len(keep) < len(items):
+            items = [items[k] for k in keep]
+            voiced = [voiced[k] for k in keep]
+            leads = [leads[k] for k in keep]
+            ticks = [t for t, _ in items]
     sizes = [1 if bass else min(CHORD_SIZE[chord_kind(v)], max_chord) for v in voiced]
     line = [max(v) if leads[i] else min(v) for i, v in enumerate(voiced)]
     frets = [0] * len(items)
@@ -469,7 +572,7 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
         if k + 1 < len(items):
             length = min(length, items[k + 1][0] - t - SUSTAIN_GAP)
         length = (length // SIXTEENTH) * SIXTEENTH
-        if p.held is False and p.end - p.start < 0.6:
+        if p.held is False and p.end - p.start < 0.4:
             length = 0
         if (notes and k and set(p.pitches) <= set(items[k - 1][1].pitches)
                 and p.start <= items[k - 1][1].end + HELD_GAP and p.attack < NEW_ATTACK):
@@ -491,7 +594,7 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
                    "gestures": [(n.tick, p.gesture, int(tm.tick(p.end))) for n, (_, p) in zip(notes, items)]}
 
 
-def extend_sustains(ps: list[Played], c: Contour, floor: float = 0.06) -> list[Played]:
+def extend_sustains(ps: list[Played], c: Contour, floor: float = 0.12) -> list[Played]:
     """Hold a note as long as its pitch keeps sounding: follow the contour past
     the transcriber's end while it stays within a semitone of one of the note's
     pitches (dropouts up to `floor` seconds allowed), up to the next note."""

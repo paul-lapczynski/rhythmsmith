@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import __version__
-from ..chart import Part, Section, Song, VocalPart, tempo_map, write_ini, write_mid
+from ..chart import Part, Phrase, Section, Song, VocalPart, tempo_map, write_ini, write_mid
 from ..chart.model import TempoMap
 from ..chart.tempo import beat_this_beats, detect_beats
 from . import ai_model as ai, audio, charting, drums, music, pitched, vocals
@@ -131,7 +131,7 @@ def folder_name(title: str, artist: str) -> str:
 def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, cache: Path | None = None,
          art_online: bool = False, ai_beats: bool = False, ai_notes: bool = True, whisper: bool = True,
          title: str | None = None, artist: str | None = None, log=print, cancel=None,
-         ai_model: bool = False) -> Result:
+         ai_model: bool = False, stereo_solos: bool = False) -> Result:
     """Chart `src` into the song folder `out` (made if missing). `cancel`: a callable,
     checked between steps; when it returns True, make() stops with Cancelled. `ai_model`:
     place guitar, bass and drums with the AI model where its file is installed
@@ -266,6 +266,14 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
             times, strengths = music.onsets(audio_y, sr, offset=pad, delta=music.ONSET_DELTA[name])
             ps = music.from_onsets(times, strengths, raw[name], c)
         ps = [x for x in ps if x.start >= pad]
+        spans = None
+        if stereo_solos and name == "guitar" and src_stem in stem_files:
+            # experimental: on the held-out songs the stereo split found few real solos
+            spans = solo_sections(stem_files[src_stem], ps)
+            for a_t, b_t, v in spans or []:
+                lo_s, hi_s = tm.seconds(a_t), tm.seconds(b_t)
+                ps = [x for x in ps if not lo_s <= x.start < hi_s] + music.solo_notes(voice_events[v], (a_t, b_t), tm)
+            solos[name] = spans
         for x, a_ in zip(ps, music.attacks(audio_y, sr, [x.start - pad for x in ps]) if ps else []):
             x.attack = a_
         ps = music.merge_held(ps)
@@ -274,16 +282,40 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
             ps, g = music.gestures(ps, c)
             ps = music.extend_sustains(ps, c)
             gestures[name] = g
-        ns, info = music.chart(ps, tm, bass=name == "bass")
+        ns, info = music.chart(ps, tm, bass=name == "bass", solos=spans)
         chords[name] = {k: v for k, v in info.items() if k not in ("gestures", "lead")}
         return ns
 
-    gestures, chords = {}, {}
+    voice_events: dict = {}
+
+    def solo_sections(stem_path, ps):
+        """Solo sections from the guitar stem's stereo voices (music.solo_spans), or
+        None when the stem is mono or the voices can't be transcribed."""
+        if not pitched.basic_pitch_available():
+            return None
+        vs = music.stereo_voices(audio.load(stem_path, sr, mono=False), sr)
+        if vs is None:
+            return None
+        log("progress: guitar lead and rhythm voices")
+        rms = {}
+        for v, yv in vs.items():
+            tmp = cache / f"voice_{v}.wav"
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            import soundfile as sf
+            sf.write(str(tmp), yv, sr)
+            raw = pitched._basic_pitch(tmp, "guitar", log) or []
+            voice_events[v] = pitched.group([[s + pad, e + pad, p, a] for s, e, p, a in raw], min_amp=0.2)
+            rms[v] = music.loudness(yv)
+        first = int(tm.tick(min((x.start for x in ps), default=pad)))
+        return music.solo_spans(voice_events, rms, sr, tm, pad, first, int(tm.tick(duration)))
+
+    gestures, chords, solos = {}, {}, {}
     for name in ("guitar", "bass"):
         if name in raw:
             check()
             ns = fretted(name)
             song.parts[name] = Part(charting.all_difficulties(ns), charting.star_power(ns))
+            song.parts[name].solos = [Phrase(a, b - a) for a, b, _ in solos.get(name) or []]
     if "drums" in raw:
         ns = model_notes("drums")
         if ns is None:
