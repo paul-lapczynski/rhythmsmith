@@ -25,6 +25,10 @@ from ..chart.tempo import beat_this_beats, detect_beats
 from . import audio, charting, drums, pitched, vocals
 
 LEAD_IN = 2.5                   # seconds before the first note (Clone Hero wants 2 or more)
+
+
+class Cancelled(Exception):
+    """make() was asked to stop (its `cancel` callable returned True)."""
 ALL = ("guitar", "bass", "drums", "vocals")
 
 
@@ -125,8 +129,13 @@ def folder_name(title: str, artist: str) -> str:
 
 def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, cache: Path | None = None,
          art_online: bool = False, ai_beats: bool = False, ai_notes: bool = True, whisper: bool = True,
-         title: str | None = None, artist: str | None = None, log=print) -> Result:
-    """Chart `src` into the song folder `out` (made if missing)."""
+         title: str | None = None, artist: str | None = None, log=print, cancel=None) -> Result:
+    """Chart `src` into the song folder `out` (made if missing). `cancel`: a callable,
+    checked between steps; when it returns True, make() stops with Cancelled."""
+
+    def check():
+        if cancel is not None and cancel():
+            raise Cancelled()
     t0 = time.time()
     timings = {}
     src, out = Path(src), Path(out)
@@ -138,6 +147,8 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
 
     stem_files = audio.stems(src, cache, guitar="guitar" in instruments, given=stems_dir, log=log)
     timings["stems"] = time.time() - t0
+    check()
+    log("progress: loading audio")
     t = time.time()
     mix = audio.load(src)
     sr = audio.SR
@@ -149,6 +160,8 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
     elif "other" in st:
         guitar_src = "other"
     timings["load"] = time.time() - t
+    check()
+    log("progress: finding the beats")
 
     t = time.time()
     found = beat_this_beats(src, log) if ai_beats else None
@@ -159,17 +172,23 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         beats, downs = detect_beats(mix, sr, low=st.get("drums"))
         used["beats"] = "librosa"
     timings["beats"] = time.time() - t
+    check()
 
     t = time.time()
     raw: dict = {}
     if "drums" in instruments:
+        log("progress: drums")
         raw["drums"] = drums.hits(st.get("drums", mix), sr, sensitivity=1.0 if "drums" in st else 0.7)
         used["drums"] = "drums stem" if "drums" in st else "full mix"
+    check()
     if "guitar" in instruments:
+        log("progress: guitar")
         y = st.get(guitar_src) if guitar_src else mix
         raw["guitar"] = pitched.events(stem_files.get(guitar_src), y, "guitar", ai_notes, sr, log)
         used["guitar"] = f"{guitar_src or 'full mix'} ({'basic-pitch' if ai_notes and pitched.basic_pitch_available() else 'pYIN'})"
+    check()
     if "bass" in instruments:
+        log("progress: bass")
         y = st.get("bass")
         if y is None:
             import librosa
@@ -177,12 +196,16 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         raw["bass"] = pitched.events(stem_files.get("bass"), y, "bass", ai_notes, sr, log)
         used["bass"] = "bass stem" if "bass" in st else "full mix"
     has_lyrics = False
+    check()
     if "vocals" in instruments and "vocals" in st:
+        log("progress: vocals")
         import librosa
         y16 = librosa.resample(st["vocals"], orig_sr=sr, target_sr=vocals.SR_V)
         raw["vocals"], has_lyrics = vocals.notes(stem_files["vocals"], y16, whisper, log)
         used["vocals"] = "vocals stem" + (" + Whisper lyrics" if has_lyrics else "")
     timings["transcribe"] = time.time() - t
+    check()
+    log("progress: charting")
 
     # silence in front, so the first note is LEAD_IN seconds in
     firsts = [h.time for h in raw.get("drums", [])[:1]] + [e.start for k in ("guitar", "bass") for e in raw.get(k, [])[:1]]
@@ -230,6 +253,8 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         song.sections[0].tick = max(0, max(b for b in bars if b <= first_note) if bars else 0)
     song.music_start = max(0, first_note - 4 * 480)
 
+    check()
+    log("progress: writing the song folder")
     t = time.time()
     if stem_files:
         names = {"guitar": guitar_src, "bass": "bass", "drums": "drums", "vocals": "vocals"}
