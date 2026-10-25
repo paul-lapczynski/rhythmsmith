@@ -227,7 +227,9 @@ def gestures(ps: list[Played], c: Contour) -> tuple[list[Played], dict]:
                    and abs(voiced[-1] - voiced[0]) >= 0.8 and p.attack < 0.15)
         # a slide is a forced HOPO; other legato notes are left to Clone Hero's own
         # HOPO rule (close notes on different frets), which already covers hammer-ons
-        p.hopo = bool(gliding)
+        # a hammer-on or pull-off: quick (within an 8th at 120 BPM), no new pick, another note
+        legato = p.attack < 0.2 and p.start - q.start <= 0.25
+        p.hopo = bool(gliding or legato)
         p.gesture = "slide" if gliding else "legato"
         counts[p.gesture] += 1
         q.end = min(q.end, p.start) if p.gesture == "slide" else q.end
@@ -313,49 +315,143 @@ def fret_map(roots: list[int], lo: float, hi: float) -> dict[int, int]:
     return {p: start + int(round((p - uniq[0]) / span * (width - 1))) for p in uniq}
 
 
+THIRTYSECOND = R // 8
+OVERTONES = (12, 19, 24, 28, 31)           # semitones above a note where its harmonics ring
+LEAD_MIN_NOTES = 4
+
+
+def without_overtones(pitches: list[int], lead: bool) -> list[int]:
+    """Drop pitches that are likely harmonics of a lower one (distortion rings
+    octaves and fifths above). In a rhythm part an octave or a fifth above is
+    kept: that's how power chords are voiced."""
+    ps = sorted(set(pitches))
+    harm = OVERTONES if lead else OVERTONES[1:]
+    return [x for x in ps if not any(x - y in harm for y in ps if y < x)] or ps[:1]
+
+
+def is_lead(group: list[Played], ticks: list[int], hi_pitch: float) -> bool:
+    """A lead (solo) phrase: mostly one note at a time, and fast or high."""
+    if len(group) < LEAD_MIN_NOTES:
+        return False
+    mono = np.mean([len(without_overtones(p.pitches, True)) == 1 for p in group])
+    beats = max(1.0, (ticks[-1] - ticks[0]) / R)
+    fast = len(group) / beats >= 2.0                       # 8th notes or quicker
+    high = np.median([max(p.pitches) for p in group]) >= hi_pitch
+    return mono >= 0.6 and (fast or high)
+
+
+def plan_frets(pitches: list[int], sizes: list[int], start: int) -> list[int]:
+    """The lowest fret of each note in a phrase, by Viterbi over the 5 lanes:
+    a step up goes right and down goes left (about a fret per two semitones),
+    the same pitch stays on the same fret, and a line that runs out of lanes
+    resets to the other side to keep its direction (the Rock Band convention)."""
+    n = len(pitches)
+    inf = 1e9
+    cost = np.full((n, 5), inf)
+    back = np.zeros((n, 5), int)
+    for f in range(5 - sizes[0] + 1):
+        cost[0, f] = 0.4 * abs(f - start)
+    for i in range(1, n):
+        step = pitches[i] - pitches[i - 1]
+        want = int(np.clip(round(abs(step) / 2), 1, 3)) if step else 0
+        for f in range(5 - sizes[i] + 1):
+            best, arg = inf, 0
+            for g in range(5 - sizes[i - 1] + 1):
+                if cost[i - 1, g] >= inf:
+                    continue
+                d = f - g
+                edge = (g + sizes[i - 1] - 1 >= 4) if step > 0 else g == 0
+                if step == 0:
+                    c = 0.0 if d == 0 else 8.0
+                elif (step > 0 and d > 0) or (step < 0 and d < 0):
+                    c = 0.5 * abs(abs(d) - want)
+                elif d == 0:
+                    c = 1.5 if edge else 4.0               # equal is fine only against the edge
+                else:
+                    c = 2.5 if edge else 7.0               # a reset: only when out of room
+                c += cost[i - 1, g]
+                if c < best:
+                    best, arg = c, g
+            cost[i, f], back[i, f] = best, arg
+    f = int(np.argmin(cost[-1]))
+    out = [f]
+    for i in range(n - 1, 0, -1):
+        f = int(back[i, f])
+        out.append(f)
+    return out[::-1]
+
+
 def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple[list[Note], dict]:
-    """Expert chart notes from the played notes; and what was done (counts).
-    max_chord: the largest chord, in frets (1-4)."""
-    items = []
+    """Expert chart notes from the played notes, a phrase at a time with the
+    whole song known; and what was done (counts). max_chord: the largest chord,
+    in frets (1-4)."""
+    items: list[tuple[int, Played]] = []
     for p in sorted(ps, key=lambda p: p.start):
-        t = quantize(tm.tick(p.start))
-        if items and t - items[-1][0] < SIXTEENTH:            # two starts in one 16th: keep the stronger
-            if p.strength > items[-1][1].strength:
-                items[-1] = (t, p)
-            continue
+        tick = tm.tick(p.start)
+        t = quantize(tick)
+        if items and t - items[-1][0] < SIXTEENTH:
+            # two starts in one 16th: a quick run (a different note) goes on the 32nd grid
+            t32 = int(round(tick / THIRTYSECOND) * THIRTYSECOND)
+            if p.pitches != items[-1][1].pitches and t32 - items[-1][0] >= THIRTYSECOND:
+                t = t32
+            else:
+                if p.strength > items[-1][1].strength:
+                    items[-1] = (items[-1][0], p)
+                continue
         items.append((t, p))
     if not items:
         return [], {}
-    roots = [p.pitches[0] for _, p in items]
-    lo, hi = np.percentile(roots, 5), np.percentile(roots, 95)
     ticks = [t for t, _ in items]
+    tops = [max(p.pitches) for _, p in items]
+    lo, hi = np.percentile(tops, 5), np.percentile(tops, 95)
+    hi_pitch = np.percentile(tops, 70)
+    # each note: its pitches without overtones, single or chord, and the pitch the line follows
+    voiced: list[list[int]] = [[] for _ in items]
+    leads = [False] * len(items)
+    for ph in phrases(ticks):
+        lead = not bass and is_lead([items[i][1] for i in ph], [ticks[i] for i in ph], hi_pitch)
+        for i in ph:
+            p = items[i][1]
+            v = without_overtones(p.pitches, lead)
+            # in a solo, a chord only when two or more notes clearly ring together
+            if lead and len(v) > 1 and (p.end - p.start < 0.25 or len({x % 12 for x in v}) < 2):
+                v = [max(v)]
+            voiced[i] = v
+            leads[i] = lead
+    sizes = [1 if bass else min(CHORD_SIZE[chord_kind(v)], max_chord) for v in voiced]
+    line = [max(v) if leads[i] else min(v) for i, v in enumerate(voiced)]
     frets = [0] * len(items)
     seen: dict[tuple, list[int]] = {}
     repeats = 0
     for ph in phrases(ticks):
-        key = tuple((ticks[i] - ticks[ph[0]], roots[i]) for i in ph)
+        key = tuple((ticks[i] - ticks[ph[0]], line[i], sizes[i]) for i in ph)
         if key in seen:                                        # a riff we've charted: the same frets
             for i, f in zip(ph, seen[key]):
                 frets[i] = f
             repeats += 1
             continue
-        m = fret_map([roots[i] for i in ph], lo, hi)
-        for i in ph:
-            frets[i] = m[roots[i]]
+        pitches = [line[i] for i in ph]
+        if len(set(pitches)) <= 5:
+            # the line fits the five lanes: one fret per pitch for the whole phrase
+            m = fret_map(pitches, lo, hi)
+            plan = [min(m[x], 5 - sizes[i]) for x, i in zip(pitches, ph)]
+        else:
+            # it doesn't: follow it note by note, resetting when it runs out of room
+            center = (np.median(pitches) - lo) / max(1.0, hi - lo)
+            plan = plan_frets(pitches, [sizes[i] for i in ph], int(np.clip(round(center * 4), 0, 4)))
+        for i, f in zip(ph, plan):
+            frets[i] = f
         seen[key] = [frets[i] for i in ph]
     notes: list[Note] = []
     kinds = {"single": 0, "power": 0, "full": 0, "dense": 0}
     for k, (t, p) in enumerate(items):
-        kind = "single" if bass else chord_kind(p.pitches)
-        kinds[kind] += 1
-        size = min(CHORD_SIZE[kind], max_chord)
-        base = min(frets[k], 5 - size)
-        lanes = tuple(range(base, base + size))
+        kinds["single" if bass else chord_kind(voiced[k])] += 1
+        lanes = tuple(range(frets[k], frets[k] + sizes[k]))
         length = int(round(tm.tick(p.end) - t))
         if k + 1 < len(items):
             length = min(length, items[k + 1][0] - t - SUSTAIN_GAP)
         length = (length // SIXTEENTH) * SIXTEENTH
-        if p.held is False:
+        if p.held is False and p.end - p.start < 0.6:
             length = 0
         if (notes and k and set(p.pitches) <= set(items[k - 1][1].pitches)
                 and p.start <= items[k - 1][1].end + HELD_GAP and p.attack < NEW_ATTACK):
@@ -365,15 +461,43 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
         if p.hopo and notes:
             forced = "hopo"
             prev = notes[-1]
-            step = p.pitches[0] - items[k - 1][1].pitches[0]
+            step = line[k] - line[k - 1]
             if lanes == prev.lanes and step:
                 # a slide or hammer-on lands on another fret, in its direction
                 shift = 1 if step > 0 else -1
                 if 0 <= lanes[0] + shift and lanes[-1] + shift <= 4:
                     lanes = tuple(x + shift for x in lanes)
         notes.append(Note(t, lanes, length if length >= MIN_SUSTAIN else 0, forced=forced))
-    return notes, {"kinds": kinds, "repeated_phrases": repeats,
+    return notes, {"kinds": kinds, "repeated_phrases": repeats, "lead_notes": int(sum(leads)),
+                   "lead": list(leads),
                    "gestures": [(n.tick, p.gesture, int(tm.tick(p.end))) for n, (_, p) in zip(notes, items)]}
+
+
+def extend_sustains(ps: list[Played], c: Contour, floor: float = 0.06) -> list[Played]:
+    """Hold a note as long as its pitch keeps sounding: follow the contour past
+    the transcriber's end while it stays within a semitone of one of the note's
+    pitches (dropouts up to `floor` seconds allowed), up to the next note."""
+    ps = sorted(ps, key=lambda p: p.start)
+    step = float(c.times[1] - c.times[0]) if len(c.times) > 1 else 0.023
+    for k, p in enumerate(ps):
+        stop = ps[k + 1].start if k + 1 < len(ps) else p.end + 4.0
+        i = int(np.searchsorted(c.times, p.end))
+        gap = 0.0
+        end = p.end
+        while i < len(c.times) and c.times[i] < stop:
+            m = c.midi[i]
+            if np.isnan(m):
+                gap += step
+                if gap > floor:
+                    break
+            elif min(abs(m - x) for x in p.pitches) <= 1.0:
+                gap = 0.0
+                end = float(c.times[i])
+            else:
+                break
+            i += 1
+        p.end = max(p.end, end)
+    return ps
 
 
 # ------------------------------------------------------------------ checks

@@ -269,6 +269,7 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         if c is not None:
             log(f"progress: {name} slides and bends")
             ps, g = music.gestures(ps, c)
+            ps = music.extend_sustains(ps, c)
             gestures[name] = g
         ns, info = music.chart(ps, tm, bass=name == "bass")
         chords[name] = {k: v for k, v in info.items() if k != "gestures"}

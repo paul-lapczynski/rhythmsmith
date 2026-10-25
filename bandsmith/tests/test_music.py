@@ -130,3 +130,28 @@ def test_repick_inside_a_ringing_chord_keeps_the_shape():
     notes, _ = music.chart(ps, TM)
     assert len(notes) == 2 and notes[1].lanes == notes[0].lanes
     assert music.held_changes(notes, ps, TM) == 0
+
+
+def test_long_runs_reset_and_keep_direction():
+    # a run down eight scale steps: more pitches than lanes, so the chart resets
+    run = [64, 62, 60, 59, 57, 55, 53, 52]
+    ps = [p(1.0 + 0.125 * i, 1.1 + 0.125 * i, x) for i, x in enumerate(run)]
+    notes, _ = music.chart(ps, TM)
+    frets = [n.lanes[0] for n in notes]
+    moves = [b - a for a, b in zip(frets, frets[1:])]
+    assert sum(m < 0 for m in moves) >= 5                       # mostly heading left
+    assert any(m > 0 for m in moves)                            # with a reset back up
+    assert all(m != 0 for m in moves)                           # never stuck on one fret
+
+
+def test_solo_overtones_are_not_chords():
+    # a fast high run where the transcriber also hears each note's octave
+    ps = [p(1.0 + 0.125 * i, 1.08 + 0.125 * i, x, x + 12) for i, x in enumerate([64, 66, 67, 69, 71, 72])]
+    notes, info = music.chart(ps, TM)
+    assert info["lead_notes"] == 6 and all(len(n.lanes) == 1 for n in notes)
+
+
+def test_sustain_follows_the_pitch():
+    c = contour_of([(1.0, 2.6, 45, 45)])
+    ps = music.extend_sustains([p(1.0, 1.3, 45), p(3.0, 3.2, 47)], c)
+    assert ps[0].end >= 2.5
