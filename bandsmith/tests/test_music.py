@@ -188,5 +188,5 @@ def test_fast_runs_get_their_quick_notes():
     seg = [(1.0 + 0.1 * i, 1.1 + 0.1 * i, 50 + i, 50 + i) for i in range(8)]
     c = contour_of(seg)
     ps = [p(1.0 + 0.2 * i, 1.1 + 0.2 * i, 50 + 2 * i) for i in range(4)]
-    extra = music.legato_notes(ps, c)
+    extra = music.legato_notes(ps, c, hold=0.03)
     assert len(extra) >= 3 and all(len(x.pitches) == 1 for x in extra)

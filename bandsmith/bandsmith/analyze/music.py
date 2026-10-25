@@ -302,13 +302,14 @@ def slides(ps: list[Played], c: Contour) -> dict:
     return {"slide_in": n_in, "slide_out": n_out}
 
 
-def legato_notes(ps: list[Played], c: Contour, near: float = 0.06, hold: float = 0.03,
-                 busy: float = 0.3) -> list[Played]:
+def legato_notes(ps: list[Played], c: Contour, near: float = 0.06, hold: float = 0.06,
+                 busy: float = 0.3, events: list[Event] | None = None) -> list[Played]:
     """Quick notes played without a new pick (hammer-ons, pull-offs, fast runs):
     wherever the stem's pitch moves to a new semitone and holds it for `hold`
     seconds or more, inside a busy passage (notes within `busy` seconds on both
-    sides), and no note starts there yet. Each needs its pitch heard: nothing is
-    invented."""
+    sides), and no note starts there yet. Each needs its pitch heard (and, given
+    the transcription's `events`, a transcribed note of that pitch starting there
+    too): nothing is invented."""
     if not ps or len(c.times) < 3:
         return []
     step_s = float(c.times[1] - c.times[0])
@@ -329,6 +330,9 @@ def legato_notes(ps: list[Played], c: Contour, near: float = 0.06, hold: float =
         before = starts[k - 1] if k else -1e9
         after = starts[k] if k < len(starts) else 1e9
         steady = np.nanstd(c.midi[i:j + 1]) < 0.15         # a held pitch, not part of a slide
+        if steady and events is not None:
+            steady = any(abs(e.start - c.times[i]) <= near and int(m[i]) in e.pitches for e in events
+                         if abs(e.start - c.times[i]) <= near)
         if j - i + 1 >= need and steady and t0 - before >= near and after - t0 >= near \
                 and t0 - before <= busy and after - t0 <= busy:
             out.append(Played(t0, float(c.times[j]) + step_s, [int(m[i])], 0.5, 0.0))
