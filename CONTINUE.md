@@ -4,6 +4,11 @@ A handoff for any coding agent (Claude Code, OpenAI Codex, ...) picking up
 this repo. Read this first, then the [README](README.md). Last updated
 2026-10-25.
 
+**If you can read Paul's private repo `paul-lapczynski/rhythm-agent`, start
+there:** its `AGENTS.md` and `tasks/README.md` are the up-to-date task list,
+and when you finish, update its task file and history. This file is the
+fallback for when you can't.
+
 ## What this repo is
 
 RhythmSmith is a monorepo for rhythm-game chart tools. The work here is
