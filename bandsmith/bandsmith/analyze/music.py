@@ -2,12 +2,16 @@
 actually played (transcribed), held notes as one sustained note, chords by
 their intervals, frets from pitch, and repeated riffs charted the same.
 
-    1. The transcription is the source of truth: every chart note is a
-       transcribed note (pitch, start, end). Nothing is added for the rhythm.
-    2. A pitch that keeps ringing with no new attack is one note, however many
-       times the transcriber split it, sustained as long as it rings.
-    3. With the AI model, a transcribed note is kept only where the model also
-       hears a note start (its onset probability near that slot).
+    1. A note only where one is played: where a note starts (the AI model's
+       onsets when it's on, else the stem's own onsets), with the pitches the
+       transcription (basic-pitch, or pYIN) hears there. Nothing is added for
+       the rhythm, and a start with no pitch heard is dropped, unless it's a
+       sure one (a palm-muted chug), which repeats the last pitch.
+    2. A pitch that keeps ringing with no new attack is one note, sustained as
+       long as it rings (or, with the AI model, as long as the model calls it
+       held); a re-pick while it rings keeps the same frets.
+    3. A sustain ends a 16th before the next note: a repeated pluck is never
+       one long hold.
     4. A chord only where the stem really sounds two or more different pitches
        at once (starting within a strum's spread). Its size comes from the
        voicing: root and fifth (or fourth, or octave), two frets; a third in it
@@ -22,10 +26,11 @@ their intervals, frets from pitch, and repeated riffs charted the same.
        rhythm) gets the same frets.
     7. Gestures, from the stem's pitch contour and attacks: a bend or vibrato
        (the pitch moves and comes back, no new attack) stays one sustained
-       note; a slide (a glide that settles on a new note, no new attack) is the
-       held note, then the arrival as a forced HOPO on a fret in the glide's
-       direction; any other new pitch without a new attack (a hammer-on or
-       pull-off) is a HOPO too; a new attack is a normal note.
+       note; a slide (a voiced glide that settles on a new note, no new attack)
+       is the held note, then the arrival as a forced HOPO on a fret in the
+       glide's direction; hammer-ons and pull-offs are left to Clone Hero's
+       own HOPO rule (close notes on different frets); a new attack is a
+       normal note.
 """
 from __future__ import annotations
 
@@ -44,6 +49,7 @@ CHORD_WINDOW = 0.045             # seconds: pitches starting this close are one 
 HELD_GAP = 0.06                  # seconds: a "new" note this soon after the last one ended may be the same note
 NEW_ATTACK = 0.35                # onset strength (0-1 of the song's strongest) that counts as a new attack
 KEY_NAMES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
+ONSET_DELTA = {"guitar": 0.05, "bass": 0.05}   # how sure a stem onset must be, without the AI model
 
 
 @dataclass
@@ -54,8 +60,9 @@ class Played:
     pitches: list[int]
     strength: float = 1.0
     attack: float = 1.0           # onset strength of the stem at its start, 0-1
-    hopo: bool = False            # reached without a new attack (slide, hammer-on, pull-off)
+    hopo: bool = False            # reached by a slide: a forced HOPO
     gesture: str = ""             # "slide", "legato" or "" (and "bend" on notes that absorbed one)
+    held: bool | None = None      # the AI model's call on whether it's held (None: by its length)
 
 
 # ------------------------------------------------------------------ the notes that were played
@@ -83,16 +90,71 @@ def played(events: list[Event], y: np.ndarray | None = None, sr: int = 22050, of
     return ps
 
 
-def merge_held(ps: list[Played]) -> list[Played]:
+def onsets(y: np.ndarray, sr: int, offset: float = 0.0, delta: float = 0.07) -> tuple[np.ndarray, np.ndarray]:
+    """Where the stem's notes start (its onsets), on the chart's clock, and how hard (0-1)."""
+    import librosa
+    hop = 256
+    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    top = float(np.percentile(env, 99)) or 1.0
+    frames = librosa.onset.onset_detect(onset_envelope=env / top, sr=sr, hop_length=hop, delta=delta,
+                                        backtrack=False, units="frames")
+    return librosa.frames_to_time(frames, sr=sr, hop_length=hop) + offset, env[frames] / top
+
+
+def from_onsets(times, strengths, events: list[Event], c: "Contour | None" = None,
+                near: float = 0.07, held=None, sure: float = 0.6, held_cut: float = 0.35) -> list[Played]:
+    """A note at each onset, with the pitches the transcription hears there: the
+    ones starting within `near` seconds (a chord if several), else the ones still
+    ringing (a re-struck note), else the contour's pitch. With no pitch heard, a
+    sure onset (strength >= `sure`, e.g. a palm-muted chug) repeats the last
+    note's pitches; otherwise no note. `held`: the AI model's sustained-or-not
+    probability per onset, if it has one."""
+    evs = sorted(events, key=lambda e: e.start)
+    starts = np.array([e.start for e in evs]) if evs else np.zeros(0)
+    out: list[Played] = []
+    order = np.argsort(times)
+    times, strengths = np.asarray(times)[order], np.asarray(strengths)[order]
+    for k, (t, s) in enumerate(zip(times, strengths)):
+        nxt = times[k + 1] if k + 1 < len(times) else t + 4.0
+        i0, i1 = np.searchsorted(starts, t - near), np.searchsorted(starts, t + near)
+        here = evs[i0:i1]
+        if not here:
+            here = [e for e in evs[max(0, i0 - 40):i0] if e.start < t < e.end - 0.03]
+        if here:
+            pitches = sorted({p for e in here for p in e.pitches})
+            end = max(e.end for e in here)
+        elif c is not None:
+            seg = c.span(t, min(nxt, t + 0.15))
+            seg = seg[~np.isnan(seg)]
+            if len(seg) < 3:
+                if out and s >= sure:                  # a sure note with no pitch: the same as the last
+                    out.append(Played(float(t), float(min(nxt, t + 0.15)), list(out[-1].pitches), float(s), float(s)))
+                continue
+            pitches = [int(round(float(np.median(seg))))]
+            end = min(nxt, t + 0.25)
+        elif out and s >= sure:
+            pitches = list(out[-1].pitches)
+            end = min(nxt, t + 0.15)
+        else:
+            continue
+        p = Played(float(t), float(max(t + 0.05, end)), pitches, float(s), float(s))
+        if held is not None:
+            p.held = bool(held[order[k]] >= held_cut)
+        out.append(p)
+    return out
+
+
+def merge_held(ps: list[Played], trust: float = 0.6) -> list[Played]:
     """A note that repeats pitches that are still ringing, without a new attack,
-    is the same note: extend it instead."""
+    is the same note: extend it instead. A note start the AI model is sure of
+    (strength >= `trust`) is a re-strike and stays, whatever the stem's attack."""
     out: list[Played] = []
     for p in sorted(ps, key=lambda p: p.start):
         if out:
             q = out[-1]
             still = p.start <= q.end + HELD_GAP
             same = set(p.pitches) <= set(q.pitches)
-            if still and same and p.attack < NEW_ATTACK:
+            if still and same and p.attack < NEW_ATTACK and p.strength < trust:
                 q.end = max(q.end, p.end)
                 continue
         out.append(p)
@@ -149,7 +211,8 @@ def gestures(ps: list[Played], c: Contour) -> tuple[list[Played], dict]:
             continue
         tail = c.span(p.start + 0.6 * (p.end - p.start), p.end + 0.05)
         tail = tail[~np.isnan(tail)]
-        if abs(step) <= 2 and len(tail) and abs(np.median(tail) - q.pitches[0]) < 0.6:
+        if (abs(step) <= 2 and p.attack < 0.2 and p.strength < 0.6 and len(tail)
+                and abs(np.median(tail) - q.pitches[0]) < 0.6):
             # the pitch went up (or wobbled) and came back: one note, held through
             q.end = max(q.end, p.end)
             q.gesture = "bend"
@@ -157,8 +220,14 @@ def gestures(ps: list[Played], c: Contour) -> tuple[list[Played], dict]:
             continue
         between = c.span(p.start - 0.12, p.start + 0.04)
         voiced = between[~np.isnan(between)]
-        gliding = len(voiced) >= 0.8 * max(1, len(between)) and len(voiced) >= 3 and             np.all(np.sign(np.diff(voiced)) * np.sign(step) >= -0.05)
-        p.hopo = True
+        # a slide: the pitch keeps moving toward the new note for the last ~0.15 s,
+        # voiced all the way, and nothing says it was struck again
+        gliding = (len(voiced) >= 0.9 * max(1, len(between)) and len(voiced) >= 5
+                   and np.all(np.sign(np.diff(voiced)) * np.sign(step) >= -0.05)
+                   and abs(voiced[-1] - voiced[0]) >= 0.8 and p.attack < 0.15)
+        # a slide is a forced HOPO; other legato notes are left to Clone Hero's own
+        # HOPO rule (close notes on different frets), which already covers hammer-ons
+        p.hopo = bool(gliding)
         p.gesture = "slide" if gliding else "legato"
         counts[p.gesture] += 1
         q.end = min(q.end, p.start) if p.gesture == "slide" else q.end
@@ -286,6 +355,12 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
         if k + 1 < len(items):
             length = min(length, items[k + 1][0] - t - SUSTAIN_GAP)
         length = (length // SIXTEENTH) * SIXTEENTH
+        if p.held is False:
+            length = 0
+        if (notes and k and set(p.pitches) <= set(items[k - 1][1].pitches)
+                and p.start <= items[k - 1][1].end + HELD_GAP and p.attack < NEW_ATTACK):
+            # re-picked while the last note or chord still rings: the same shape again
+            lanes = notes[-1].lanes
         forced = None
         if p.hopo and notes:
             forced = "hopo"
@@ -317,8 +392,8 @@ def held_changes(notes: list[Note], ps: list[Played], tm) -> int:
 
 
 def same_pitch_same_fret(notes: list[Note], ps: list[Played], tm) -> float:
-    """Within each phrase, the share of repeated pitches that land on the fret
-    that pitch first had."""
+    """Within each phrase, the share of repeated (root) pitches that land on the
+    fret that pitch first had (a chord counts by its lowest fret)."""
     by_tick = {quantize(tm.tick(p.start)): p.pitches[0] for p in ps}
     ticks = [n.tick for n in notes]
     same = total = 0
@@ -330,7 +405,7 @@ def same_pitch_same_fret(notes: list[Note], ps: list[Played], tm) -> float:
                 continue
             if pitch in first:
                 total += 1
-                same += first[pitch] == notes[i].lanes
+                same += first[pitch] == notes[i].lanes[0]
             else:
-                first[pitch] = notes[i].lanes
+                first[pitch] = notes[i].lanes[0]
     return same / total if total else 1.0

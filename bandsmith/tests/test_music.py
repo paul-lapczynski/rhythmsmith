@@ -10,7 +10,7 @@ TM = TempoMap([Tempo(0, 120.0)])          # a beat is 0.5 s
 
 
 def p(start, end, *pitches, attack=1.0):
-    return Played(start, end, list(pitches), 1.0, attack)
+    return Played(start, end, list(pitches), attack, attack)          # stem onsets: strength is the attack
 
 
 def test_chord_kinds():
@@ -122,3 +122,11 @@ def test_easier_difficulties_only_take_away():
     drums = charting.all_difficulties([Note(480 * 4 + k * 240, (0, 1, 2), cymbals=(2,)) for k in range(32)], drums=True)
     assert all(len(n.lanes) <= 1 for n in drums["easy"])
     assert all(set(n.tick for n in drums[d]) <= set(n.tick for n in drums["expert"]) for d in ("hard", "medium", "easy"))
+
+
+def test_repick_inside_a_ringing_chord_keeps_the_shape():
+    ps = [p(1.0, 2.0, 40, 47), Played(1.5, 2.0, [40], 0.9, 0.1)]       # the model is sure of a re-pick
+    ps = music.merge_held(ps)
+    notes, _ = music.chart(ps, TM)
+    assert len(notes) == 2 and notes[1].lanes == notes[0].lanes
+    assert music.held_changes(notes, ps, TM) == 0

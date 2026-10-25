@@ -244,21 +244,34 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         return ai.predict(name, st[src_stem], mix, sr, tm, pad, int(tm.tick(duration)))
 
     def fretted(name):
-        """Guitar or bass from the notes that were played (music.py); with the AI
-        model, only those it also hears start."""
+        """Guitar or bass from the music (music.py): a note where one starts (the AI
+        model's onsets when it's on, else the stem's own), with the pitches the
+        transcription hears there."""
         src_stem = guitar_src if name == "guitar" else name
         y = st.get(src_stem)
-        ps = music.merge_held(music.played(raw[name], y if y is not None else mix, sr, offset=pad))
-        if y is not None:
-            log(f"progress: {name} slides and bends")
-            ps, g = music.gestures(ps, music.contour(y, sr, name, offset=pad))
-            gestures[name] = g
+        audio_y = y if y is not None else mix
+        c = music.contour(audio_y, sr, name, offset=pad) if y is not None else None
         if ai_model and y is not None and ai.available(name):
             out, meta = ai.run(name, y, mix, sr, tm, pad, int(tm.tick(duration)))
-            ps = music.confirm(ps, tm, out[:, 0], ai.onset_threshold(meta))
+            on = out[:, 0]
+            sl = np.array(ai._peaks(on, ai.onset_threshold(meta)), int)
+            times = np.array([tm.seconds(int(s) * 40) for s in sl])
+            held = out[sl, 8] if meta.get("heads", 1) >= 2 and len(sl) else None
+            ps = music.from_onsets(times, on[sl], raw[name], c, held=held, held_cut=meta.get("held_cut", 0.35))
             used[name] = f"{used.get(name, '')} + AI model".lstrip(" +")
+        else:
+            times, strengths = music.onsets(audio_y, sr, offset=pad, delta=music.ONSET_DELTA[name])
+            ps = music.from_onsets(times, strengths, raw[name], c)
+        ps = [x for x in ps if x.start >= pad]
+        for x, a_ in zip(ps, music.attacks(audio_y, sr, [x.start - pad for x in ps]) if ps else []):
+            x.attack = a_
+        ps = music.merge_held(ps)
+        if c is not None:
+            log(f"progress: {name} slides and bends")
+            ps, g = music.gestures(ps, c)
+            gestures[name] = g
         ns, info = music.chart(ps, tm, bass=name == "bass")
-        chords[name] = info
+        chords[name] = {k: v for k, v in info.items() if k != "gestures"}
         return ns
 
     gestures, chords = {}, {}
