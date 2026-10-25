@@ -42,9 +42,10 @@ class MakeJob(QThread):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, song: Path, out_dir: Path, parts: tuple[str, ...], art_online: bool):
+    def __init__(self, song: Path, out_dir: Path, parts: tuple[str, ...], art_online: bool, ai_model: bool = False):
         super().__init__()
         self.song, self.out_dir, self.parts, self.art_online = song, out_dir, parts, art_online
+        self.ai_model = ai_model
         self._stop = threading.Event()
 
     def cancel(self) -> None:
@@ -56,8 +57,9 @@ class MakeJob(QThread):
             title, artist, _, _ = mk.tags(self.song)
             folder = self.out_dir / mk.folder_name(title, artist)
             self.log.emit(f"charting {self.song.name} into {folder}")
+            kw = {"ai_model": True} if self.ai_model else {}
             res = mk.make(self.song, folder, self.parts, art_online=self.art_online,
-                          log=self.log.emit, cancel=self._stop.is_set)
+                          log=self.log.emit, cancel=self._stop.is_set, **kw)
             notes = ", ".join(f"{k} {v} notes" for k, v in res.notes.items())
             self.log.emit(f"done in {res.timings['total']:.0f} s: {notes}")
             self.finished_ok.emit(str(res.folder))
@@ -113,6 +115,16 @@ class MainWindow(QMainWindow):
         self.art_online.setToolTip("Only when ticked. It asks:\n" + "\n".join(
             f"{what}: {where}" for what, where in artwork.ONLINE_SOURCES))
         lay.addWidget(self.art_online)
+
+        from bandsmith.analyze import ai_model
+        found = [i for i in ("guitar", "bass", "drums") if ai_model.available(i)]
+        self.ai_model = QCheckBox("Use the AI model")
+        self.ai_model.setChecked(False)
+        self.ai_model.setEnabled(bool(found))
+        self.ai_model.setToolTip(
+            f"Places {', '.join(found)} with the AI model instead of the charting rules." if found else
+            f"No AI model is installed. Its files go in {ai_model.model_dir()} (chart_<part>.onnx and .json).")
+        lay.addWidget(self.ai_model)
 
         bar = QHBoxLayout()
         self.progress = QProgressBar()
@@ -180,7 +192,8 @@ class MainWindow(QMainWindow):
         self.open_btn.setVisible(False)
         self.status.setText(f"Working on {song.name}...")
         self.log.clear()
-        self.job = MakeJob(song, self.out_dir(), self.parts(), self.art_online.isChecked())
+        self.job = MakeJob(song, self.out_dir(), self.parts(), self.art_online.isChecked(),
+                           self.ai_model.isChecked())
         self.job.log.connect(self.log.appendPlainText)
         self.job.finished_ok.connect(self.on_done)
         self.job.failed.connect(self.on_failed)

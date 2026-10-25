@@ -22,7 +22,7 @@ from .. import __version__
 from ..chart import Part, Section, Song, VocalPart, tempo_map, write_ini, write_mid
 from ..chart.model import TempoMap
 from ..chart.tempo import beat_this_beats, detect_beats
-from . import audio, charting, drums, pitched, vocals
+from . import ai_model as ai, audio, charting, drums, pitched, vocals
 
 LEAD_IN = 2.5                   # seconds before the first note (Clone Hero wants 2 or more)
 
@@ -129,9 +129,12 @@ def folder_name(title: str, artist: str) -> str:
 
 def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, cache: Path | None = None,
          art_online: bool = False, ai_beats: bool = False, ai_notes: bool = True, whisper: bool = True,
-         title: str | None = None, artist: str | None = None, log=print, cancel=None) -> Result:
+         title: str | None = None, artist: str | None = None, log=print, cancel=None,
+         ai_model: bool = False) -> Result:
     """Chart `src` into the song folder `out` (made if missing). `cancel`: a callable,
-    checked between steps; when it returns True, make() stops with Cancelled."""
+    checked between steps; when it returns True, make() stops with Cancelled. `ai_model`:
+    place guitar, bass and drums with the AI model where its file is installed
+    (analyze.ai_model) and there are stems; the rules otherwise."""
 
     def check():
         if cancel is not None and cancel():
@@ -228,12 +231,27 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
     song = Song(name=title, artist=artist, album=album, year=year, charter=f"BandSmith {__version__}",
                 tempos=tempos, time_sigs=sigs)
     tm = song.tempo_map()
+    duration = len(mix) / sr + pad
+
+    def model_notes(name):
+        """The AI model's notes for `name`, or None to use the rules."""
+        src_stem = guitar_src if name == "guitar" else name
+        if not (ai_model and src_stem in st and ai.available(name)):
+            return None
+        log(f"progress: {name} (AI model)")
+        used[name] = f"{used.get(name, '')} + AI model".lstrip(" +")
+        return ai.predict(name, st[src_stem], mix, sr, tm, pad, int(tm.tick(duration)))
+
     for name in ("guitar", "bass"):
         if name in raw:
-            ns = charting.fret_notes(raw[name], tm)
+            ns = model_notes(name)
+            if ns is None:
+                ns = charting.fret_notes(raw[name], tm)
             song.parts[name] = Part({"expert": ns}, charting.star_power(ns))
     if "drums" in raw:
-        ns = charting.drum_notes(raw["drums"], tm)
+        ns = model_notes("drums")
+        if ns is None:
+            ns = charting.drum_notes(raw["drums"], tm)
         sp = charting.star_power(ns)
         song.parts["drums"] = Part({"expert": ns}, sp, charting.drum_fills(ns, sp))
     if raw.get("vocals"):
@@ -242,7 +260,6 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
             vp = VocalPart(vn, phrases)
             vp.star_power = [p for p in phrases[2::4]]
             song.vocals = vp
-    duration = len(mix) / sr + pad
     end_tick = int(tm.tick(duration - 0.5))
     song.end = max(song.last_tick() + 1, end_tick)
     bars = bar_ticks(song, song.end)
