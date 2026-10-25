@@ -100,13 +100,44 @@ def compare(ours, ref, pad: float = 0.0) -> dict:
             pairs = [(np.mean(l), ref_by[s]) for s, (_, l) in zip(sa, a) if s in ref_by]
             agree = [np.sign(x2 - x1) == np.sign(y2 - y1) for (x1, y1), (x2, y2) in zip(pairs, pairs[1:])]
             row["direction"] = float(np.mean(agree)) if agree else 0.0
+            # the same frets (the whole chord) within a 16th
+            row["fret_f1_near"] = fret_f1(sa, a, sb, b)
+            lanes_by = {s: l for s, (_, l) in zip(sb, b)}
+            sizes = [len(l) == len(lanes_by[s]) for s, (_, l) in zip(sa, a) if s in lanes_by]
+            row["chord_size_agree"] = float(np.mean(sizes)) if sizes else 0.0
         if part == "drums":
             for lane, name in enumerate(("kick", "snare", "yellow", "blue", "green")):
                 la = slots(np.array([t - pad for t, l in a if lane in l]), rtm)
                 lb = slots(np.array([t for t, l in b if lane in l]), rtm)
                 row[f"{name}_f1_near"] = f1(la, lb, 1)[2]
+            # tom or cymbal, on the yellow/blue/green hits that line up
+            ca = {(s, lane): lane in c for s, (_, l), c in zip(sa, a, cymbals_of(ours)) for lane in l if lane >= 2}
+            cb = {(s, lane): lane in c for s, (_, l), c in zip(sb, b, cymbals_of(ref)) for lane in l if lane >= 2}
+            both = [ca[k] == cb[k] for k in ca if k in cb]
+            row["cymbal_agree"] = float(np.mean(both)) if both else 0.0
         out[part] = row
     return out
+
+
+def fret_f1(sa, a, sb, b) -> float:
+    """F1 of notes that land within a 16th of a reference note with exactly the same frets."""
+    if not len(sa) or not len(sb):
+        return 0.0
+    ka = [tuple(l) for _, l in a]
+    kb = [tuple(l) for _, l in b]
+    hits = 0
+    for key in set(ka) & set(kb):
+        pa = np.array([s for s, k in zip(sa, ka) if k == key])
+        pb = np.array([s for s, k in zip(sb, kb) if k == key])
+        pr, _, _ = f1(pa, pb, 1)
+        hits += round(pr * len(pa))
+    p, r = hits / len(sa), hits / len(sb)
+    return 2 * p * r / (p + r) if hits else 0.0
+
+
+def cymbals_of(song) -> list:
+    p = song.parts.get("drums")
+    return [n.cymbals for n in (p.notes.get("expert", []) if p else [])]
 
 
 def scan(folder: Path) -> dict | None:

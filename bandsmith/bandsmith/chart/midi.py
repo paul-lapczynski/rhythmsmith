@@ -36,7 +36,7 @@ SUSTAIN_CUTOFF = RESOLUTION // 12
 def _events_to_track(name: str, events: list[tuple]) -> mido.MidiTrack:
     """events: (tick, order, message) with absolute ticks; note-offs sort first."""
     tr = mido.MidiTrack()
-    tr.append(mido.MetaMessage("track_name", name=name, time=0))
+    tr.append(mido.MetaMessage("track_name", name=midi_text(name), time=0))
     last = 0
     for tick, _, msg in sorted(events, key=lambda e: (e[0], e[1])):
         tr.append(msg.copy(time=tick - last))
@@ -50,8 +50,32 @@ def _note(events: list, tick: int, length: int, pitch: int, velocity: int = 100)
     events.append((tick + max(length, 1), 0, mido.Message("note_off", note=pitch, velocity=0)))
 
 
+_PLAIN = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-",
+                        "—": "-", "…": "..."})
+
+
+def midi_text(text: str) -> str:
+    """Text a .mid file can hold: MIDI text events are Latin-1, so curly quotes
+    become straight ones, accents are kept where Latin-1 has them, and anything
+    else is spelled without its accent or dropped."""
+    import unicodedata
+    text = text.translate(_PLAIN)
+    try:
+        text.encode("latin-1")
+        return text
+    except UnicodeEncodeError:
+        out = []
+        for ch in text:
+            try:
+                ch.encode("latin-1")
+                out.append(ch)
+            except UnicodeEncodeError:
+                out.append(unicodedata.normalize("NFKD", ch).encode("latin-1", "ignore").decode("latin-1"))
+        return "".join(out)
+
+
 def _text(events: list, tick: int, text: str, kind: str = "text") -> None:
-    events.append((tick, 2, mido.MetaMessage(kind, text=text)))
+    events.append((tick, 2, mido.MetaMessage(kind, text=midi_text(text))))
 
 
 def _part_events(name: str, part: Part) -> list:
