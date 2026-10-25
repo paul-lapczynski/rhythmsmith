@@ -27,10 +27,11 @@ BASE = {"expert": 96, "hard": 84, "medium": 72, "easy": 60}
 STAR_POWER, PHRASE, DOUBLE_KICK = 116, 105, 95
 ACTIVATION = range(120, 125)          # drum fills: all five, over the fill
 TOMS = {2: 110, 3: 111, 4: 112}
-# a .mid note shorter than this is a plain note, not a sustain (scan-chart and
-# Clone Hero cut sustains under 1/12 beat)
+# a .mid note this long or shorter is a plain note, not a sustain: Clone Hero's
+# default for .mid (a third of a beat and a tick; scan-chart does the same). Rock
+# Band charts write their plain notes a 16th long, so those must stay plain.
 SHORT = RESOLUTION // 32
-SUSTAIN_CUTOFF = RESOLUTION // 12
+SUSTAIN_CUTOFF = RESOLUTION // 3 + 1
 
 
 def _events_to_track(name: str, events: list[tuple]) -> mido.MidiTrack:

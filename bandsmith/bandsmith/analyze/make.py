@@ -22,7 +22,7 @@ from .. import __version__
 from ..chart import Part, Section, Song, VocalPart, tempo_map, write_ini, write_mid
 from ..chart.model import TempoMap
 from ..chart.tempo import beat_this_beats, detect_beats
-from . import ai_model as ai, audio, charting, drums, pitched, vocals
+from . import ai_model as ai, audio, charting, drums, music, pitched, vocals
 
 LEAD_IN = 2.5                   # seconds before the first note (Clone Hero wants 2 or more)
 
@@ -40,6 +40,7 @@ class Result:
     timings: dict = field(default_factory=dict)
     notes: dict = field(default_factory=dict)   # instrument -> Expert note count
     used: dict = field(default_factory=dict)    # what each part was made from
+    music: dict = field(default_factory=dict)   # key, chord kinds, slides/bends/legato found
 
 
 def tags(path: Path) -> tuple[str, str, str, str]:
@@ -242,18 +243,49 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         used[name] = f"{used.get(name, '')} + AI model".lstrip(" +")
         return ai.predict(name, st[src_stem], mix, sr, tm, pad, int(tm.tick(duration)))
 
+    def fretted(name):
+        """Guitar or bass from the music (music.py): a note where one starts (the AI
+        model's onsets when it's on, else the stem's own), with the pitches the
+        transcription hears there."""
+        src_stem = guitar_src if name == "guitar" else name
+        y = st.get(src_stem)
+        audio_y = y if y is not None else mix
+        c = music.contour(audio_y, sr, name, offset=pad) if y is not None else None
+        if ai_model and y is not None and ai.available(name):
+            out, meta = ai.run(name, y, mix, sr, tm, pad, int(tm.tick(duration)))
+            on = out[:, 0]
+            sl = np.array(ai._peaks(on, ai.onset_threshold(meta)), int)
+            times = np.array([tm.seconds(int(s) * 40) for s in sl])
+            held = out[sl, 8] if meta.get("heads", 1) >= 2 and len(sl) else None
+            ps = music.from_onsets(times, on[sl], raw[name], c, held=held, held_cut=meta.get("held_cut", 0.35))
+            used[name] = f"{used.get(name, '')} + AI model".lstrip(" +")
+        else:
+            times, strengths = music.onsets(audio_y, sr, offset=pad, delta=music.ONSET_DELTA[name])
+            ps = music.from_onsets(times, strengths, raw[name], c)
+        ps = [x for x in ps if x.start >= pad]
+        for x, a_ in zip(ps, music.attacks(audio_y, sr, [x.start - pad for x in ps]) if ps else []):
+            x.attack = a_
+        ps = music.merge_held(ps)
+        if c is not None:
+            log(f"progress: {name} slides and bends")
+            ps, g = music.gestures(ps, c)
+            gestures[name] = g
+        ns, info = music.chart(ps, tm, bass=name == "bass")
+        chords[name] = {k: v for k, v in info.items() if k != "gestures"}
+        return ns
+
+    gestures, chords = {}, {}
     for name in ("guitar", "bass"):
         if name in raw:
-            ns = model_notes(name)
-            if ns is None:
-                ns = charting.fret_notes(raw[name], tm)
-            song.parts[name] = Part({"expert": ns}, charting.star_power(ns))
+            check()
+            ns = fretted(name)
+            song.parts[name] = Part(charting.all_difficulties(ns), charting.star_power(ns))
     if "drums" in raw:
         ns = model_notes("drums")
         if ns is None:
             ns = charting.drum_notes(raw["drums"], tm)
         sp = charting.star_power(ns)
-        song.parts["drums"] = Part({"expert": ns}, sp, charting.drum_fills(ns, sp))
+        song.parts["drums"] = Part(charting.all_difficulties(ns, drums=True), sp, charting.drum_fills(ns, sp))
     if raw.get("vocals"):
         vn, phrases = charting.vocal_notes(raw["vocals"], tm)
         if vn:
@@ -301,4 +333,9 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
     counts = {n: len(p.notes.get("expert", [])) for n, p in song.parts.items()}
     if song.vocals:
         counts["vocals"] = len(song.vocals.notes)
-    return Result(out, song, pad, timings, counts, used)
+    info = {"gestures": gestures, "chords": chords}
+    try:
+        info["key"] = music.song_key(mix, sr)
+    except Exception:
+        pass
+    return Result(out, song, pad, timings, counts, used, info)

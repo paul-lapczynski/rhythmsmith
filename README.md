@@ -23,7 +23,7 @@ core/                     rhythmsmith_core: shared by the apps
 bandsmith/
   bandsmith/              the app (PySide6)
     chart/                the song model; notes.mid (read and write), song.ini, tempo map from beats
-    analyze/              stems, beats, drum/guitar/bass/vocal transcription, the Expert charting rules
+    analyze/              stems, beats, transcription, the music layer (music.py), charting, the AI model
   tests/                  tests (no song files needed: they make their own)
   tools/                  demo_song.py (a synth song with an exact chart, for tests), eval_vs_reference.py,
                           scan-chart/ (test-only chart checker, Node), inventory.py

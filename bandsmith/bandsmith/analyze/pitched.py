@@ -12,7 +12,7 @@ import numpy as np
 from .audio import SR
 
 RANGES = {"guitar": (75.0, 1400.0), "bass": (30.0, 400.0)}
-CHORD_WINDOW = 0.045            # note starts this close together are one chord
+CHORD_WINDOW = 0.04             # note starts this close together are one chord (a strum's spread)
 
 
 @dataclass

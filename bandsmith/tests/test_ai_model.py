@@ -58,7 +58,7 @@ def test_drum_notes(monkeypatch):
 def test_fretted_chords_and_sustains(monkeypatch):
     n = 480 * 6 // 40 + 1
     out = np.zeros((n, 8), np.float32)
-    out[12, 0], out[12, 1:6] = 0.9, [0.9, 0.45, 0.1, 0.1, 0.1]     # a chord: the second fret clears 0.4
+    out[12, 0], out[12, 1:6] = 0.9, [0.9, 0.55, 0.1, 0.1, 0.1]     # a chord: two frets over the lane cut
     out[12, 6] = np.log1p(24)                                       # rings 24 slots = 2 beats
     out[72, 0], out[72, 1:6] = 0.9, [0.1, 0.1, 0.3, 0.1, 0.1]       # one note
     notes, _ = run(monkeypatch, "guitar", out)

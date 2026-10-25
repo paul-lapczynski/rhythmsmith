@@ -117,3 +117,19 @@ def test_scan_chart_clean(tmp_path, scan_chart):
     assert folder == [] and res["metadataIssues"] == []
     issues = sorted({i["noteIssue"] for i in res["chartIssues"]})
     assert issues == [], res["chartIssues"][:10]
+
+
+def test_sixteenth_notes_are_not_sustains():
+    """Rock Band writes plain notes a 16th long; Clone Hero only sustains past 1/3 beat."""
+    import mido
+    from bandsmith.chart import from_midi
+    mf = mido.MidiFile(type=1, ticks_per_beat=R)
+    mf.tracks.append(mido.MidiTrack([mido.MetaMessage("set_tempo", tempo=500000, time=0)]))
+    tr = mido.MidiTrack([mido.MetaMessage("track_name", name="PART GUITAR", time=0)])
+    for pitch, length in ((96, R // 4), (97, R // 3 + 1), (98, R // 3 + 2)):
+        tr += [mido.Message("note_on", note=pitch, velocity=100, time=0),
+               mido.Message("note_off", note=pitch, velocity=0, time=length),
+               mido.Message("note_on", note=0, velocity=0, time=R)]
+    mf.tracks.append(tr)
+    notes = from_midi(mf).parts["guitar"].notes["expert"]
+    assert [n.length for n in notes] == [0, 0, R // 3 + 2]

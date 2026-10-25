@@ -90,10 +90,17 @@ def _peaks(p: np.ndarray, thr: float, gap: int = 3) -> list[int]:
 
 
 def predict(inst: str, stem: np.ndarray, mix: np.ndarray, sr: int, tm, pad: float, end_tick: int,
-            diff: str = "expert", path: Path | None = None, lane_threshold: float | None = None,
-            chord_threshold: float | None = None) -> list[Note]:
+            diff: str = "expert", path: Path | None = None, lane_threshold: float | None = None) -> list[Note]:
     """Chart notes for `inst` from its stem and the full mix (mono, at `sr`, without
     the lead-in `pad`), on the tempo map `tm` (which includes the pad)."""
+    out, meta = run(inst, stem, mix, sr, tm, pad, end_tick, diff, path)
+    return decode(inst, out, meta, tm, pad, diff, lane_threshold)
+
+
+def run(inst: str, stem: np.ndarray, mix: np.ndarray, sr: int, tm, pad: float, end_tick: int,
+        diff: str = "expert", path: Path | None = None) -> tuple[np.ndarray, dict]:
+    """The model's output, one row per 1/12-beat slot from tick 0 to end_tick, and its settings.
+    Column 0 is the probability that a note starts in that slot."""
     path = path or model_path(inst)
     sess, meta = _session(str(path))
     if sr != meta["sr"]:
@@ -107,6 +114,16 @@ def predict(inst: str, stem: np.ndarray, mix: np.ndarray, sr: int, tm, pad: floa
     x = np.stack([_windows(ms, frames, win), _windows(mm, frames, win)], axis=1)[None]     # (1, S, 2, win, mels)
     out = sess.run(None, {"x": x.astype(np.float32), "phase": phase_features(n)[None],
                           "diff": np.array([DIFFS.index(diff)], np.int64)})[0][0]
+    return out, meta
+
+
+def onset_threshold(meta: dict, diff: str = "expert") -> float:
+    return float(meta.get("confirm_thresholds", meta.get("thresholds", {})).get(diff, 0.5))
+
+
+def decode(inst: str, out: np.ndarray, meta: dict, tm, pad: float, diff: str = "expert",
+           lane_threshold: float | None = None) -> list[Note]:
+    """Chart notes from the model's output rows."""
     on, lanes = out[:, 0], out[:, 1:6]
     thr = meta.get("thresholds", {}).get(diff, 0.5)
     slots = _peaks(on, thr)
@@ -127,11 +144,12 @@ def predict(inst: str, stem: np.ndarray, mix: np.ndarray, sr: int, tm, pad: floa
             cym = out[s, 8:11]
             cymbals = tuple(sorted(i for i in chosen if i >= 2 and cym[i - 2] >= 0.5))
         else:
-            # the likeliest fret, plus up to two more when they clear the chord cutoff
-            ct = chord_threshold if chord_threshold is not None else meta.get("chord_threshold", lt)
             order = [int(i) for i in np.argsort(-lp)]
-            chosen = [order[0]] + [i for i in order[1:3] if lp[i] >= ct]
-            sus = float(np.expm1(max(0.0, out[s, 6]))) * SLOT_TICKS
+            # the frets the model hears; how many from its chord-size head when it has one
+            size = int(np.argmax(out[s, 9:12])) + 1 if meta.get("heads", 1) >= 2 else len(chosen)
+            chosen = order[: max(1, min(size, 3))]
+            held = meta.get("heads", 1) < 2 or out[s, 8] >= meta.get("sustain_threshold", 0.5)
+            sus = float(np.expm1(max(0.0, out[s, 6]))) * SLOT_TICKS if held else 0.0
             nxt = slots[j + 1] * SLOT_TICKS if j + 1 < len(slots) else None
             if nxt is not None:
                 sus = min(sus, nxt - s * SLOT_TICKS - 120)
