@@ -63,6 +63,7 @@ class Played:
     hopo: bool = False            # reached by a slide: a forced HOPO
     gesture: str = ""             # "slide", "legato" or "" (and "bend" on notes that absorbed one)
     held: bool | None = None      # the AI model's call on whether it's held (None: by its length)
+    chord_ok: bool | None = None  # the AI model's call on whether a chord belongs here (None: no model)
 
 
 # ------------------------------------------------------------------ the notes that were played
@@ -102,13 +103,15 @@ def onsets(y: np.ndarray, sr: int, offset: float = 0.0, delta: float = 0.07) -> 
 
 
 def from_onsets(times, strengths, events: list[Event], c: "Contour | None" = None,
-                near: float = 0.07, held=None, sure: float = 0.6, held_cut: float = 0.35) -> list[Played]:
+                near: float = 0.07, held=None, sure: float = 0.6, held_cut: float = 0.35,
+                chordy=None, chord_cut: float = 0.3) -> list[Played]:
     """A note at each onset, with the pitches the transcription hears there: the
     ones starting within `near` seconds (a chord if several), else the ones still
     ringing (a re-struck note), else the contour's pitch. With no pitch heard, a
     sure onset (strength >= `sure`, e.g. a palm-muted chug) repeats the last
     note's pitches; otherwise no note. `held`: the AI model's sustained-or-not
-    probability per onset, if it has one."""
+    probability per onset, if it has one; `chordy`: its probability of a chord there
+    (two frets or more), which can only veto a chord the transcription heard."""
     evs = sorted(events, key=lambda e: e.start)
     starts = np.array([e.start for e in evs]) if evs else np.zeros(0)
     out: list[Played] = []
@@ -140,6 +143,8 @@ def from_onsets(times, strengths, events: list[Event], c: "Contour | None" = Non
         p = Played(float(t), float(max(t + 0.05, end)), pitches, float(s), float(s))
         if held is not None:
             p.held = bool(held[order[k]] >= held_cut)
+        if chordy is not None:
+            p.chord_ok = bool(chordy[order[k]] >= chord_cut)
         out.append(p)
     return out
 
@@ -227,9 +232,9 @@ def gestures(ps: list[Played], c: Contour) -> tuple[list[Played], dict]:
                    and abs(voiced[-1] - voiced[0]) >= 0.8 and p.attack < 0.15)
         # a slide is a forced HOPO; other legato notes are left to Clone Hero's own
         # HOPO rule (close notes on different frets), which already covers hammer-ons
-        # a hammer-on or pull-off: quick (within an 8th at 120 BPM), no new pick, another note
-        legato = p.attack < 0.2 and p.start - q.start <= 0.25
-        p.hopo = bool(gliding or legato)
+        # only slides are forced: hammer-ons and pull-offs are left to Clone Hero's own
+        # HOPO rule (a quick note on another fret), which matches the official charts better
+        p.hopo = bool(gliding)
         p.gesture = "slide" if gliding else "legato"
         counts[p.gesture] += 1
         q.end = min(q.end, p.start) if p.gesture == "slide" else q.end
@@ -317,7 +322,7 @@ def fret_map(roots: list[int], lo: float, hi: float) -> dict[int, int]:
 
 THIRTYSECOND = R // 8
 OVERTONES = (12, 19, 24, 28, 31)           # semitones above a note where its harmonics ring
-LEAD_MIN_NOTES = 4
+LEAD_MIN_NOTES = 6
 
 
 def without_overtones(pitches: list[int], lead: bool) -> list[int]:
@@ -335,22 +340,26 @@ def is_lead(group: list[Played], ticks: list[int], hi_pitch: float) -> bool:
         return False
     mono = np.mean([len(without_overtones(p.pitches, True)) == 1 for p in group])
     beats = max(1.0, (ticks[-1] - ticks[0]) / R)
-    fast = len(group) / beats >= 2.0                       # 8th notes or quicker
+    fast = len(group) / beats >= 3.0                       # quicker than 8th notes
     high = np.median([max(p.pitches) for p in group]) >= hi_pitch
-    return mono >= 0.6 and (fast or high)
+    moving = len({max(p.pitches) for p in group}) >= 4     # a line, not one riff note repeated
+    return bool(mono >= 0.8 and moving and (fast or high))
 
 
-def plan_frets(pitches: list[int], sizes: list[int], start: int) -> list[int]:
+def plan_frets(pitches: list[int], sizes: list[int], start: int, prefer: dict | None = None) -> list[int]:
     """The lowest fret of each note in a phrase, by Viterbi over the 5 lanes:
     a step up goes right and down goes left (about a fret per two semitones),
     the same pitch stays on the same fret, and a line that runs out of lanes
-    resets to the other side to keep its direction (the Rock Band convention)."""
+    resets to the other side to keep its direction (the Rock Band convention).
+    `prefer`: a fret per pitch to stay on where the line allows (same pitch, same fret)."""
     n = len(pitches)
     inf = 1e9
     cost = np.full((n, 5), inf)
     back = np.zeros((n, 5), int)
+    def keep(i, f):
+        return 2.0 if prefer and pitches[i] in prefer and prefer[pitches[i]] != f else 0.0
     for f in range(5 - sizes[0] + 1):
-        cost[0, f] = 0.4 * abs(f - start)
+        cost[0, f] = 0.4 * abs(f - start) + keep(0, f)
     for i in range(1, n):
         step = pitches[i] - pitches[i - 1]
         want = int(np.clip(round(abs(step) / 2), 1, 3)) if step else 0
@@ -369,7 +378,7 @@ def plan_frets(pitches: list[int], sizes: list[int], start: int) -> list[int]:
                     c = 1.5 if edge else 4.0               # equal is fine only against the edge
                 else:
                     c = 2.5 if edge else 7.0               # a reset: only when out of room
-                c += cost[i - 1, g]
+                c += cost[i - 1, g] + keep(i, f)
                 if c < best:
                     best, arg = c, g
             cost[i, f], back[i, f] = best, arg
@@ -413,9 +422,12 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
         for i in ph:
             p = items[i][1]
             v = without_overtones(p.pitches, lead)
-            # in a solo, a chord only when two or more notes clearly ring together
-            if lead and len(v) > 1 and (p.end - p.start < 0.25 or len({x % 12 for x in v}) < 2):
+            # in a solo, single notes, unless a power chord is clearly held
+            if lead and len(v) > 1 and not (chord_kind(v) == "power" and p.end - p.start >= 0.4):
                 v = [max(v)]
+            # pitches heard together, but the AI model hears no chord here: bleed or let-ring
+            if len(v) > 1 and p.chord_ok is False:
+                v = [max(v)] if lead else [min(v)]
             voiced[i] = v
             leads[i] = lead
     sizes = [1 if bass else min(CHORD_SIZE[chord_kind(v)], max_chord) for v in voiced]
@@ -438,7 +450,13 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4) -> tuple
         else:
             # it doesn't: follow it note by note, resetting when it runs out of room
             center = (np.median(pitches) - lo) / max(1.0, hi - lo)
-            plan = plan_frets(pitches, [sizes[i] for i in ph], int(np.clip(round(center * 4), 0, 4)))
+            sz, st = [sizes[i] for i in ph], int(np.clip(round(center * 4), 0, 4))
+            plan = plan_frets(pitches, sz, st)
+            # again, now preferring each pitch's most used fret: repeats stay put between resets
+            usual = {x: max(set(f for y, f in zip(pitches, plan) if y == x),
+                            key=lambda f: sum(1 for y, g in zip(pitches, plan) if y == x and g == f))
+                     for x in set(pitches)}
+            plan = plan_frets(pitches, sz, st, usual)
         for i, f in zip(ph, plan):
             frets[i] = f
         seen[key] = [frets[i] for i in ph]
