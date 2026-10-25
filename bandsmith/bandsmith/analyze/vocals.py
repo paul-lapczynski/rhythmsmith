@@ -73,7 +73,8 @@ def syllables(word: str) -> list[str]:
     if not parts or "".join(parts) != w:
         return [w]
     if len(parts) > 1 and re.fullmatch(r"[^aeiouy]*e", parts[-1], flags=re.I):   # silent e
-        parts[-2] += parts.pop()
+        last = parts.pop()
+        parts[-1] += last
     return parts
 
 

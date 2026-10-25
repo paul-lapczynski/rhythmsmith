@@ -94,3 +94,19 @@ def test_make_scans_clean(made):
     assert set(res["instruments"]) == {"guitar", "bass", "drums"} and res["hasVocals"]
     assert [i for i in res["chartIssues"]] == []
     assert [i["folderIssue"] for i in res["folderIssues"]] in ([], ["noAlbumArt"])
+
+
+def test_syllables():
+    from bandsmith.analyze.vocals import syllables
+    assert syllables("alone") == ["a", "lone"]            # a silent e stays on its syllable
+    assert syllables("like") == ["like"] and syllables("singing") == ["sin", "ging"]
+
+
+def test_lyrics_with_curly_quotes_write(tmp_path):
+    from bandsmith.chart import Song, VocalNote, VocalPart, read_mid, write_mid
+    from bandsmith.chart.midi import midi_text
+    assert midi_text("don’t “stop” — naïve") == "don't \"stop\" - naïve"
+    s = Song(name="Café 日本")
+    s.vocals = VocalPart([VocalNote(480 * 4, 240, 60, "don’t")])
+    write_mid(s, tmp_path / "notes.mid")
+    assert read_mid(tmp_path / "notes.mid").vocals.notes[0].lyric == "don't"
