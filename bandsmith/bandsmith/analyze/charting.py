@@ -172,3 +172,71 @@ def tier(notes: list[Note], tm) -> int:
     secs = tm.seconds(notes[-1].tick) - tm.seconds(notes[0].tick)
     nps = len(notes) / max(1.0, secs)
     return int(np.clip(round(nps / 1.4), 0, 6))
+
+
+# ------------------------------------------------------------------ easier difficulties
+
+LOWER = ("hard", "medium", "easy")
+MIN_GAP_BY = {"hard": R // 2, "medium": R, "easy": 2 * R}          # space between kept notes
+LANES_BY = {"expert": 5, "hard": 5, "medium": 4, "easy": 3}        # frets in use (green first)
+CHORD_BY = {"expert": 4, "hard": 3, "medium": 2, "easy": 1}        # the largest chord
+DRUM_HANDS_BY = {"expert": 2, "hard": 2, "medium": 1, "easy": 1}
+
+
+def strength(tick: int) -> int:
+    """How strong a place in the bar is (4/4 assumed): bar, half, beat, 8th, the rest."""
+    for k, step in enumerate((4 * R, 2 * R, R, R // 2)):
+        if tick % step == 0:
+            return 4 - k
+    return 0
+
+
+def reduce(notes: list[Note], diff: str, drums: bool = False) -> list[Note]:
+    """An easier chart made only by taking away from `notes` (Expert): never a
+    note Expert doesn't have. Notes on stronger beats are kept first, with at
+    least MIN_GAP_BY[diff] between them; chords lose their top notes; frets are
+    squeezed into fewer lanes in order, so the shape of a line stays the same."""
+    gap = MIN_GAP_BY[diff]
+    order = sorted(range(len(notes)), key=lambda i: (-strength(notes[i].tick), -len(notes[i].lanes), notes[i].tick))
+    kept_ticks: list[int] = []
+    keep = set()
+    import bisect
+    for i in order:
+        t = notes[i].tick
+        j = bisect.bisect_left(kept_ticks, t)
+        near = [kept_ticks[k] for k in (j - 1, j) if 0 <= k < len(kept_ticks)]
+        if all(abs(t - u) >= gap for u in near):
+            bisect.insort(kept_ticks, t)
+            keep.add(i)
+    out: list[Note] = []
+    idx = sorted(keep)
+    for k, i in enumerate(idx):
+        n = notes[i]
+        if drums:
+            kick = [0] if 0 in n.lanes and (diff != "easy" or len(n.lanes) == 1) else []
+            hands = [x for x in n.lanes if x != 0][: DRUM_HANDS_BY[diff]]
+            lanes = tuple(sorted(kick + hands))
+            out.append(Note(n.tick, lanes, 0, cymbals=tuple(c for c in n.cymbals if c in lanes)))
+            continue
+        width = LANES_BY[diff]
+        squeezed = sorted({round(x * (width - 1) / 4) for x in n.lanes})
+        lanes = tuple(squeezed[: CHORD_BY[diff]])
+        length = n.length
+        if k + 1 < len(idx):
+            length = min(length, notes[idx[k + 1]].tick - n.tick - SUSTAIN_GAP)
+        length = length if length >= MIN_SUSTAIN else 0
+        out.append(Note(n.tick, lanes, length, forced=n.forced if diff == "hard" else None))
+    return out
+
+
+def all_difficulties(expert: list[Note], drums: bool = False) -> dict[str, list[Note]]:
+    """Hard from Expert, Medium from Hard, Easy from Medium: each only takes away
+    from the one above it. Frets are squeezed from Expert's each time, so a pitch
+    keeps its place in the line."""
+    out = {"expert": expert}
+    prev = expert
+    for d in LOWER:
+        kept = {n.tick for n in reduce(prev, d, drums)}
+        out[d] = reduce([n for n in expert if n.tick in kept], d, drums)
+        prev = [n for n in expert if n.tick in kept]
+    return out
