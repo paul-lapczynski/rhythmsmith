@@ -256,8 +256,11 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
             on = out[:, 0]
             sl = np.array(ai._peaks(on, ai.onset_threshold(meta)), int)
             times = np.array([tm.seconds(int(s) * 40) for s in sl])
-            held = out[sl, 8] if meta.get("heads", 1) >= 2 and len(sl) else None
-            ps = music.from_onsets(times, on[sl], raw[name], c, held=held, held_cut=meta.get("held_cut", 0.35))
+            two = meta.get("heads", 1) >= 2 and len(sl)
+            held = out[sl, 8] if two else None
+            chordy = out[sl, 10:12].sum(axis=1) if two else None       # chord size 2 or 3+
+            ps = music.from_onsets(times, on[sl], raw[name], c, held=held, held_cut=meta.get("held_cut", 0.35),
+                                   chordy=chordy)
             used[name] = f"{used.get(name, '')} + AI model".lstrip(" +")
         else:
             times, strengths = music.onsets(audio_y, sr, offset=pad, delta=music.ONSET_DELTA[name])
@@ -269,9 +272,10 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
         if c is not None:
             log(f"progress: {name} slides and bends")
             ps, g = music.gestures(ps, c)
+            ps = music.extend_sustains(ps, c)
             gestures[name] = g
         ns, info = music.chart(ps, tm, bass=name == "bass")
-        chords[name] = {k: v for k, v in info.items() if k != "gestures"}
+        chords[name] = {k: v for k, v in info.items() if k not in ("gestures", "lead")}
         return ns
 
     gestures, chords = {}, {}
