@@ -20,7 +20,7 @@ datas = [(SPECPATH + "/version.txt", "."), (SPECPATH + "/bandsmith.png", "."),
 hidden = ["rhythmsmith_core", "rhythmsmith_core.accel", "rhythmsmith_core.addons",
           "rhythmsmith_core.artwork", "rhythmsmith_core.lyrics", "rhythmsmith_core.stems",
           "rhythmsmith_core.beats", "rhythmsmith_core.notes", "mutagen", "mido", "mido.backends",
-          "bandsmith.cli", "bandsmith.analyze.make", "bandsmith.analyze.ai_model"]
+          "bandsmith.cli", "bandsmith.analyze.make", "bandsmith.analyze.ai_model", "bandsmith.analyze.arranger"]
 binaries = []
 from PyInstaller.utils.hooks import collect_all
 for pkg in ("librosa", "soundfile", "lazy_loader", "audioread", "soxr", "mido", "onnxruntime"):
