@@ -22,7 +22,7 @@ from .. import __version__
 from ..chart import Part, Phrase, Section, Song, VocalPart, tempo_map, write_ini, write_mid
 from ..chart.model import TempoMap
 from ..chart.tempo import beat_this_beats, detect_beats
-from . import ai_model as ai, audio, charting, drums, music, pitched, vocals
+from . import ai_model as ai, arranger, audio, charting, drums, music, pitched, vocals
 
 LEAD_IN = 2.5                   # seconds before the first note (Clone Hero wants 2 or more)
 
@@ -284,7 +284,25 @@ def make(src: Path, out: Path, instruments=ALL, stems_dir: Path | None = None, c
             ps = music.extend_sustains(sorted(ps + quick, key=lambda x: x.start), c)
             g.update(music.slides(ps, c), quick_notes=len(quick))
             gestures[name] = g
-        ns, info = music.chart(ps, tm, bass=name == "bass", solos=spans)
+        arranged = None
+        if ai_model and arranger.available(name) and ps:
+            # the arranger: chord sizes, HOPOs and (guitar) solo sections, from the whole song
+            ps = sorted(ps, key=lambda x: x.start)
+            evs = sorted(raw[name], key=lambda e: e.start)
+            starts = np.array([e.start for e in evs])
+            ticks = [music.quantize(tm.tick(x.start)) for x in ps]
+            looked = [arranger.lookup(x.start, starts, evs) for x in ps]
+            out = arranger.run(name, arranger.features(ticks, [l[0] for l in looked], [l[1] for l in looked],
+                                                       [l[2] for l in looked], tm))
+            heard = [len(music.without_overtones(x.pitches, False)) for x in ps]
+            # bass keeps the rules' HOPOs (the arranger's matched the official charts less often)
+            hops = arranger.hopos(out) if name == "guitar" else [None] * len(ps)
+            arranged = {t: (s, h) for t, s, h in zip(ticks, arranger.chord_sizes(out, heard), hops)}
+            if name == "guitar" and spans is None:
+                spans = [(a, b, "") for a, b in arranger.solo_sections(ticks, out)]
+                solos[name] = spans
+            used[name] = f"{used.get(name, '')} + arranger".lstrip(" +")
+        ns, info = music.chart(ps, tm, bass=name == "bass", solos=spans, arranged=arranged)
         chords[name] = {k: v for k, v in info.items() if k not in ("gestures", "lead")}
         return ns
 

@@ -624,13 +624,16 @@ def plan_frets(pitches: list[int], sizes: list[int], start: int, prefer: dict | 
 
 
 def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
-          strict: float | None = None, solos: list[tuple[int, int, str]] | None = None) -> tuple[list[Note], dict]:
+          strict: float | None = None, solos: list[tuple[int, int, str]] | None = None,
+          arranged: dict[int, tuple[int, bool]] | None = None) -> tuple[list[Note], dict]:
     """Expert chart notes from the played notes, a phrase at a time with the
     whole song known; and what was done (counts). max_chord: the largest chord,
     in frets (1-4). strict: notes found with a lower bar (strength under
     `strict`) are kept only in solos, where quick quiet notes matter. solos: the
     solo sections (solo_spans), when the voices could be told apart; without
-    them a phrase is a solo by how it moves (is_lead)."""
+    them a phrase is a solo by how it moves (is_lead). arranged: the arranger
+    model's (chord size, HOPO) by note tick; the frets, sustains and the
+    same-note rule stay the rules'."""
     items: list[tuple[int, Played]] = []
     for p in sorted(ps, key=lambda p: p.start):
         tick = tm.tick(p.start)
@@ -684,6 +687,12 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
             leads = [leads[k] for k in keep]
             ticks = [t for t, _ in items]
     sizes = [1 if bass else min(CHORD_SIZE[chord_kind(v)], max_chord) for v in voiced]
+    if arranged and not bass:
+        # the arranger's chord sizes (never a chord where one pitch is heard; in a solo, never bigger)
+        for i, t in enumerate(ticks):
+            if t in arranged:
+                size = min(arranged[t][0], max_chord)
+                sizes[i] = min(size, sizes[i]) if leads[i] else (size if len(voiced[i]) > 1 else 1)
     line = [max(v) if leads[i] else min(v) for i, v in enumerate(voiced)]
     frets = [0] * len(items)
     seen: dict[tuple, list[int]] = {}
@@ -720,9 +729,14 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
         lanes = tuple(range(frets[k], frets[k] + sizes[k]))
         length = int(round(tm.tick(p.end) - t))
         if k + 1 < len(items):
-            length = min(length, items[k + 1][0] - t - SUSTAIN_GAP)
+            room = items[k + 1][0] - t - SUSTAIN_GAP
+            # a note that rings through most of the space to the next one is held up to it,
+            # as the official charts do
+            if room >= MIN_SUSTAIN and length >= HOLD_FILL * room:
+                length = room
+            length = min(length, room)
         length = (length // SIXTEENTH) * SIXTEENTH
-        if p.held is False and p.end - p.start < 0.4:
+        if HELD_VETO and p.held is False and p.end - p.start < 0.4:
             length = 0
         if (notes and k and set(p.pitches) <= set(items[k - 1][1].pitches)
                 and p.start <= items[k - 1][1].end + HELD_GAP and p.attack < NEW_ATTACK):
@@ -741,6 +755,13 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
         if notes and voiced[k] == voiced[k - 1] and line[k] == line[k - 1]:
             # the same note or chord again: always the same frets (a hard rule, across phrases)
             lanes = notes[-1].lanes
+        if arranged and forced is None and t in arranged and arranged[t][1] is not None:
+            # HOPO or strum as the arranger says, where it differs from Clone Hero's own rule
+            natural = bool(notes) and len(lanes) == 1 and t - notes[-1].tick <= 170 and lanes != notes[-1].lanes
+            if arranged[t][1] and not natural:
+                forced = "hopo"
+            elif not arranged[t][1] and natural:
+                forced = "strum"
         notes.append(Note(t, lanes, length if length >= MIN_SUSTAIN else 0, forced=forced))
     notes, slide_counts = slide_notes(notes, items, line, tm, bass)
     return notes, {"kinds": kinds, "repeated_phrases": repeats, "lead_notes": int(sum(leads)), **slide_counts,
@@ -749,6 +770,8 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
 
 
 GRACE_GAP = 0.05             # seconds: how far ahead of its target a slide's lead-in note sits
+HOLD_FILL = float(__import__("os").environ.get("BANDSMITH_HOLD_FILL", "0.6"))   # ring share of the gap that holds to the next note
+HELD_VETO = __import__("os").environ.get("BANDSMITH_HELD_VETO", "0") == "1"      # let the AI model cut a short ring (it held too few)
 
 
 def slide_notes(notes: list[Note], items, line, tm, bass: bool) -> tuple[list[Note], dict]:
