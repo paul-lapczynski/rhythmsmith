@@ -155,3 +155,38 @@ def test_sustain_follows_the_pitch():
     c = contour_of([(1.0, 2.6, 45, 45)])
     ps = music.extend_sustains([p(1.0, 1.3, 45), p(3.0, 3.2, 47)], c)
     assert ps[0].end >= 2.5
+
+
+def test_the_same_note_never_switches_buttons():
+    # a riff that repeats notes across phrase gaps, chords included, and a long run
+    seq = [45, 45, 45, 47, 47, 50, 50, 50, 45, 45]
+    ps = [p(1.0 + 0.25 * i, 1.1 + 0.25 * i, x) for i, x in enumerate(seq)]
+    ps += [p(4.0, 4.1, 45), p(5.0, 5.1, 45)]                    # the same note after a phrase gap
+    ps += [p(6.0 + 0.125 * i, 6.08 + 0.125 * i, x) for i, x in enumerate([64, 62, 60, 59, 57, 55, 53, 52, 52, 52])]
+    ps += [p(8.0, 8.2, 40, 47), p(8.5, 8.7, 40, 47), p(9.5, 9.7, 40, 47)]
+    notes, info = music.chart(ps, TM)
+    assert music.repeat_switches(notes, info["voiced"]) == 0
+    for d in ("hard", "medium", "easy"):
+        from bandsmith.analyze import charting
+        lower = charting.all_difficulties(notes)[d]
+        assert music.repeat_switches(lower, info["voiced"]) == 0
+
+
+def test_bass_slide_in_gets_a_lead_in_note():
+    c = contour_of([(1.0, 1.4, 40, 40), (1.85, 1.98, 42, 44), (1.98, 2.5, 44, 44)])
+    ps = [p(1.0, 1.4, 40), p(2.0, 2.5, 44)]
+    music.slides(ps, c)
+    assert ps[1].slide_in is not None
+    notes, info = music.chart(ps, TM, bass=True)
+    assert info["slide_in_notes"] == 1 and len(notes) == 3
+    grace, target = notes[1], notes[2]
+    assert target.forced == "hopo" and grace.lanes[0] < target.lanes[0] and target.tick - grace.tick <= 120
+
+
+def test_fast_runs_get_their_quick_notes():
+    # a run where the pick only hits every other note: the pitch changes in between are notes too
+    seg = [(1.0 + 0.1 * i, 1.1 + 0.1 * i, 50 + i, 50 + i) for i in range(8)]
+    c = contour_of(seg)
+    ps = [p(1.0 + 0.2 * i, 1.1 + 0.2 * i, 50 + 2 * i) for i in range(4)]
+    extra = music.legato_notes(ps, c, hold=0.03)
+    assert len(extra) >= 3 and all(len(x.pitches) == 1 for x in extra)

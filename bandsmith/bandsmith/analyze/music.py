@@ -65,6 +65,8 @@ class Played:
     held: bool | None = None      # the AI model's call on whether it's held (None: by its length)
     chord_ok: bool | None = None  # the AI model's call on whether a chord belongs here (None: no model)
     amp: float = 1.0              # how loud the transcription heard it (0-1)
+    slide_in: tuple | None = None  # (glide start s, from pitch) when it slides into its pitch
+    slide_out: tuple | None = None  # (glide end s, to pitch) when it slides off at its end
 
 
 # ------------------------------------------------------------------ the notes that were played
@@ -246,6 +248,99 @@ def gestures(ps: list[Played], c: Contour) -> tuple[list[Played], dict]:
     return out, counts
 
 
+# ------------------------------------------------------------------ slides into and off notes
+
+GLIDE_MIN, GLIDE_MAX = 0.04, 0.25      # seconds a slide takes
+GLIDE_STEP = 1.0                       # semitones it covers at least
+
+
+def _glide(seg: np.ndarray, step_s: float) -> tuple[int, int] | None:
+    """(start, end) frame of a steady glide in a contour segment: voiced, moving one
+    way, covering GLIDE_STEP or more within GLIDE_MIN-GLIDE_MAX seconds."""
+    voiced = np.flatnonzero(~np.isnan(seg))
+    if len(voiced) < 3:
+        return None
+    seg = seg[voiced[0]:voiced[-1] + 1]                # silence before or after doesn't count
+    if np.isnan(seg).mean() > 0.2:
+        return None
+    s = seg[~np.isnan(seg)]
+    d = np.diff(s)
+    total = s[-1] - s[0]
+    if abs(total) < GLIDE_STEP or not np.all(np.sign(d) * np.sign(total) >= -0.1):
+        return None
+    dur = len(s) * step_s
+    return (0, len(s)) if GLIDE_MIN <= dur <= GLIDE_MAX + step_s else None
+
+
+def slides(ps: list[Played], c: Contour) -> dict:
+    """Mark slides into notes (the pitch glides up or down to the note's pitch just
+    before or at its start) and off them (it glides away at the end of a held
+    note). Returns counts."""
+    step_s = float(c.times[1] - c.times[0]) if len(c.times) > 1 else 0.023
+    n_in = n_out = 0
+    ps = sorted(ps, key=lambda p: p.start)
+    for k, p in enumerate(ps):
+        target = p.pitches[-1] if len(p.pitches) == 1 else None
+        if target is None:
+            continue
+        prev_end = ps[k - 1].end if k else 0.0
+        i0 = int(np.searchsorted(c.times, max(prev_end, p.start - GLIDE_MAX)))
+        i1 = int(np.searchsorted(c.times, p.start + 0.06))
+        seg = c.midi[i0:i1]
+        if _glide(seg, step_s) and abs(np.nanmedian(seg[-2:]) - target) <= 0.6:
+            first = seg[~np.isnan(seg)][0]
+            p.slide_in = (float(c.times[i0]), int(round(first)))
+            n_in += 1
+        nxt = ps[k + 1].start if k + 1 < len(ps) else p.end + GLIDE_MAX
+        j0 = int(np.searchsorted(c.times, p.end - 0.03))
+        j1 = int(np.searchsorted(c.times, min(nxt, p.end + GLIDE_MAX)))
+        seg = c.midi[j0:j1]
+        if p.end - p.start >= 0.25 and _glide(seg, step_s) and abs(np.nanmedian(seg[:2]) - target) <= 0.6:
+            last = seg[~np.isnan(seg)][-1]
+            p.slide_out = (float(c.times[min(j1, len(c.times) - 1)]), int(round(last)))
+            n_out += 1
+    return {"slide_in": n_in, "slide_out": n_out}
+
+
+def legato_notes(ps: list[Played], c: Contour, near: float = 0.06, hold: float = 0.06,
+                 busy: float = 0.3, events: list[Event] | None = None) -> list[Played]:
+    """Quick notes played without a new pick (hammer-ons, pull-offs, fast runs):
+    wherever the stem's pitch moves to a new semitone and holds it for `hold`
+    seconds or more, inside a busy passage (notes within `busy` seconds on both
+    sides), and no note starts there yet. Each needs its pitch heard (and, given
+    the transcription's `events`, a transcribed note of that pitch starting there
+    too): nothing is invented."""
+    if not ps or len(c.times) < 3:
+        return []
+    step_s = float(c.times[1] - c.times[0])
+    need = max(2, int(np.ceil(hold / step_s)))
+    starts = np.array(sorted(p.start for p in ps))
+    m = np.round(c.midi)
+    out: list[Played] = []
+    i = 1
+    while i < len(m):
+        if np.isnan(m[i]) or np.isnan(m[i - 1]) or m[i] == m[i - 1]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(m) and m[j + 1] == m[i]:
+            j += 1
+        t0 = float(c.times[i])
+        k = int(np.searchsorted(starts, t0))
+        before = starts[k - 1] if k else -1e9
+        after = starts[k] if k < len(starts) else 1e9
+        steady = np.nanstd(c.midi[i:j + 1]) < 0.15         # a held pitch, not part of a slide
+        if steady and events is not None:
+            steady = any(abs(e.start - c.times[i]) <= near and int(m[i]) in e.pitches for e in events
+                         if abs(e.start - c.times[i]) <= near)
+        if j - i + 1 >= need and steady and t0 - before >= near and after - t0 >= near \
+                and t0 - before <= busy and after - t0 <= busy:
+            out.append(Played(t0, float(c.times[j]) + step_s, [int(m[i])], 0.5, 0.0))
+            out[-1].gesture = "legato"
+        i = j + 1
+    return out
+
+
 # ------------------------------------------------------------------ lead and rhythm voices
 
 VOICES = ("left", "center", "right")
@@ -308,6 +403,61 @@ def solo_spans(voice_events: dict[str, list[Event]], voice_rms: dict[str, np.nda
         elif lead:
             spans.append([t, t + SOLO_WINDOW, lead])
     return [(a, b, v) for a, b, v in spans if b - a >= SOLO_MIN * SOLO_WINDOW]
+
+
+PAN_SHARE = 0.55            # a side voice's share of the loudness that makes a solo
+PAN_QUIET = 0.4             # ...and its usual (median) share, for it to count as a lead that comes and goes
+PAN_SMOOTH_BARS = 4
+
+
+PAN_MONO = 0.7             # the lead side plays one note at a time at least this often
+PAN_SWING = 0.25            # ...and its share swings by this much (95th percentile over median)
+
+
+def pan_solos(voice_rms: dict[str, np.ndarray], sr: int, tm, offset: float, first: int, last: int,
+              voice_events: dict[str, list[Event]] | None = None, min_bars: int = 2) -> list[tuple[int, int, str]]:
+    """Solos from where the guitar sits in the stereo mix: one side voice (left or
+    right), the one that plays single notes most (a lead line), usually in the
+    background but taking over for two bars or more, smoothed over four bars.
+    Nothing for songs without such a lead (no side that mostly plays single
+    notes, or whose loudness doesn't swing)."""
+    bar = 4 * R
+    frames_per_s = sr / VOICE_HOP
+    starts = list(range((first // bar) * bar, last, bar))
+    shares = {v: [] for v in ("left", "right")}
+    for t in starts:
+        a, b = tm.seconds(t) - offset, tm.seconds(t + bar) - offset
+        fa, fb = int(a * frames_per_s), max(int(a * frames_per_s) + 1, int(b * frames_per_s))
+        e = {v: float(np.mean(voice_rms[v][fa:fb] ** 2)) if fa < len(voice_rms[v]) else 0.0 for v in voice_rms}
+        total = sum(e.values()) or 1.0
+        for v in shares:
+            shares[v].append(e.get(v, 0.0) / total)
+    out: list[tuple[int, int, str]] = []
+    k = np.ones(PAN_SMOOTH_BARS) / PAN_SMOOTH_BARS
+    sides = list(shares)
+    if voice_events:
+        mono = {v: np.mean([len(without_overtones(e.pitches, True)) == 1 for e in voice_events.get(v, [])] or [0])
+                for v in sides}
+        lead = max(sides, key=lambda v: mono[v])
+        sides = [lead] if mono[lead] >= PAN_MONO else []
+    for v in sides:
+        s = np.array(shares[v])
+        if len(s) < PAN_SMOOTH_BARS or np.median(s) > PAN_QUIET or np.percentile(s, 95) - np.median(s) < PAN_SWING:
+            continue                                   # always loud, or never stands out: not a lead
+        smooth = np.convolve(s, k, mode="same")
+        on = smooth >= PAN_SHARE
+        i = 0
+        while i < len(on):
+            if on[i]:
+                j = i
+                while j + 1 < len(on) and on[j + 1]:
+                    j += 1
+                if j - i + 1 >= min_bars:
+                    out.append((starts[i], starts[j] + bar, v))
+                i = j + 1
+            else:
+                i += 1
+    return sorted(out)
 
 
 def solo_notes(events: list[Event], span: tuple[int, int], tm, offset_ok: float = 0.0,
@@ -440,7 +590,7 @@ def plan_frets(pitches: list[int], sizes: list[int], start: int, prefer: dict | 
     cost = np.full((n, 5), inf)
     back = np.zeros((n, 5), int)
     def keep(i, f):
-        return 2.0 if prefer and pitches[i] in prefer and prefer[pitches[i]] != f else 0.0
+        return 4.0 if prefer and pitches[i] in prefer and prefer[pitches[i]] != f else 0.0
     for f in range(5 - sizes[0] + 1):
         cost[0, f] = 0.4 * abs(f - start) + keep(0, f)
     for i in range(1, n):
@@ -588,10 +738,62 @@ def chart(ps: list[Played], tm, bass: bool = False, max_chord: int = 4,
                 shift = 1 if step > 0 else -1
                 if 0 <= lanes[0] + shift and lanes[-1] + shift <= 4:
                     lanes = tuple(x + shift for x in lanes)
+        if notes and voiced[k] == voiced[k - 1] and line[k] == line[k - 1]:
+            # the same note or chord again: always the same frets (a hard rule, across phrases)
+            lanes = notes[-1].lanes
         notes.append(Note(t, lanes, length if length >= MIN_SUSTAIN else 0, forced=forced))
-    return notes, {"kinds": kinds, "repeated_phrases": repeats, "lead_notes": int(sum(leads)),
-                   "lead": list(leads),
+    notes, slide_counts = slide_notes(notes, items, line, tm, bass)
+    return notes, {"kinds": kinds, "repeated_phrases": repeats, "lead_notes": int(sum(leads)), **slide_counts,
+                   "lead": list(leads), "voiced": {it[0]: tuple(v) for it, v in zip(items, voiced)},
                    "gestures": [(n.tick, p.gesture, int(tm.tick(p.end))) for n, (_, p) in zip(notes, items)]}
+
+
+GRACE_GAP = 0.05             # seconds: how far ahead of its target a slide's lead-in note sits
+
+
+def slide_notes(notes: list[Note], items, line, tm, bass: bool) -> tuple[list[Note], dict]:
+    """Slides as the official charts write them: a slide into a note gets a short
+    lead-in note a step below (or above) just before the target, which becomes a
+    HOPO (always on bass, where charts do it about half the time; on guitar only
+    for slides of two semitones or more); a slide off a held note gets a short
+    HOPO note where it lands, and the held note ends before it."""
+    out = list(notes)
+    taken = sorted(n.tick for n in notes)
+    import bisect
+
+    def free(tick):
+        i = bisect.bisect_left(taken, tick)
+        return all(abs(tick - taken[j]) >= THIRTYSECOND for j in (i - 1, i) if 0 <= j < len(taken))
+
+    n_in = n_out = 0
+    for k, (t, p) in enumerate(items):
+        n = notes[k]
+        if len(n.lanes) != 1:
+            continue
+        if p.slide_in:
+            frm = p.slide_in[1]
+            step = line[k] - frm
+            if step and (bass or abs(step) >= 2):
+                g = int(round(tm.tick(p.start - GRACE_GAP) / THIRTYSECOND) * THIRTYSECOND)
+                f = n.lanes[0] - (1 if step > 0 else -1)
+                if t - g >= THIRTYSECOND and 0 <= f <= 4 and free(g):
+                    out.append(Note(g, (f,)))                  # appended: out[k] is still this note
+                    bisect.insort(taken, g)
+                    n = out[k] = Note(n.tick, n.lanes, n.length, forced="hopo")
+                    n_in += 1
+        if p.slide_out and n.length:
+            to = p.slide_out[1]
+            step = to - line[k]
+            g = int(round(tm.tick(p.slide_out[0]) / THIRTYSECOND) * THIRTYSECOND)
+            f = n.lanes[0] + (1 if step > 0 else -1)
+            if step and g - t >= MIN_SUSTAIN and 0 <= f <= 4 and free(g):
+                length = g - t - SIXTEENTH
+                out[k] = Note(n.tick, n.lanes, length if length >= MIN_SUSTAIN else 0, forced=n.forced)
+                out.append(Note(g, (f,), forced="hopo"))
+                bisect.insort(taken, g)
+                n_out += 1
+    out.sort(key=lambda n: n.tick)
+    return out, {"slide_in_notes": n_in, "slide_out_notes": n_out}
 
 
 def extend_sustains(ps: list[Played], c: Contour, floor: float = 0.12) -> list[Played]:
@@ -622,6 +824,14 @@ def extend_sustains(ps: list[Played], c: Contour, floor: float = 0.12) -> list[P
 
 
 # ------------------------------------------------------------------ checks
+
+def repeat_switches(notes: list[Note], voiced: dict[int, tuple]) -> int:
+    """Consecutive chart notes with the same pitch (or voicing) on different frets:
+    must be 0 (a real instrument doesn't move to play the same note again).
+    `voiced`: tick -> pitches, from chart()'s info."""
+    return sum(1 for a, b in zip(notes, notes[1:])
+               if a.tick in voiced and b.tick in voiced and voiced[a.tick] == voiced[b.tick] and a.lanes != b.lanes)
+
 
 def held_changes(notes: list[Note], ps: list[Played], tm) -> int:
     """Chart notes that start while the previous note's pitch is still ringing
