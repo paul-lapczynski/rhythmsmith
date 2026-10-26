@@ -22,6 +22,7 @@ def small_song() -> Song:
     s.parts["guitar"] = Part({"expert": [Note(4 * R, (0, 1)), Note(5 * R, (2,), forced="hopo"),
                                          Note(6 * R, (4,), length=R, forced="strum")]},
                              [Phrase(4 * R, 4 * R)])
+    s.parts["guitar"].solos = [Phrase(5 * R, 2 * R)]
     s.parts["bass"] = Part({"expert": [Note(4 * R, (0,)), Note(4 * R + R // 4, (1,))],
                             "hard": [Note(4 * R, (0,))]})
     s.parts["drums"] = Part({"expert": [Note(4 * R, (0, 2), cymbals=(2,)), Note(5 * R, (1,)),
@@ -43,6 +44,7 @@ def test_round_trip():
         assert back.parts[name].notes == s.parts[name].notes, name
     assert back.parts["guitar"].star_power == s.parts["guitar"].star_power
     assert back.parts["drums"].activations == s.parts["drums"].activations
+    assert back.parts["guitar"].solos == s.parts["guitar"].solos
     assert back.vocals.notes == s.vocals.notes
     assert back.vocals.phrases == s.vocals.phrases
     assert back.end == s.end
